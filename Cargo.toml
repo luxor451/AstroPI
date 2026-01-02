@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-plate_solving = { path = "plate_solving" }
+astro_pi_plate_solving = { path = "AstroPI_PlateSolving" }
