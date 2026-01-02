@@ -1,0 +1,3 @@
+[submodule "plate_solving"]
+	path = plate_solving
+	url = https://github.com/luxor451/AstroPI_PlateSolving
