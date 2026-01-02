@@ -5,3 +5,5 @@ edition = "2021"
 
 [dependencies]
 astro_pi_plate_solving = { path = "AstroPI_PlateSolving" }
+env_logger = "0.11"
+log = "0.4"
