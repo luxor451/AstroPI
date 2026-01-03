@@ -1,24 +1,22 @@
-use astro_pi_plate_solving::{solve_plate, CoordinateEquatorial, RaHoursMinutesSeconds, Arcdegrees};
-use std::path::Path;
-use std::time::Instant;
+mod read_csv;
+mod tui;
 
+use read_csv::load_messier_catalogue;
+use tui::run_tui;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logger - controlled via RUST_LOG env var
-    // e.g., RUST_LOG=trace cargo run, RUST_LOG=astro_pi_plate_solving=debug cargo run
     env_logger::init();
 
-    let initial = CoordinateEquatorial::new(
-        RaHoursMinutesSeconds::new(12, 15, 21.4),
-        Arcdegrees::new(54, 1, 14.40),
-    );
-    let image_path = Path::new("camera_img/IMG_8993.CR3");
+    // Load Messier catalogue
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .unwrap_or_else(|_| ".".to_string());
+    let catalogue_path = format!("{}/messier.csv", manifest_dir);
+    let catalogue = load_messier_catalogue(&catalogue_path)?;
+    
+    println!("Loaded {} Messier objects from catalogue", catalogue.len());
 
-    let start = Instant::now();
-    let result = solve_plate(image_path, &initial)?;
-    let elapsed = start.elapsed();
-
-    println!("{}", result);
-    println!("Execution time: {:.2?}", elapsed);
-    Ok(())
+    // Run the TUI
+    run_tui(&catalogue)
 }
+
