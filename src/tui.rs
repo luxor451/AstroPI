@@ -42,7 +42,7 @@ fn parse_dec(dec_str: &str) -> Option<Arcdegrees> {
 }
 
 /// Run the TUI for Messier object lookup and plate solving
-pub fn run_tui(catalogue: &[MessierObject]) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_tui(catalogue: &[MessierObject], image_path : &Path) -> Result<(), Box<dyn std::error::Error>> {
     // Ask user for Messier object
     print!("Enter Messier object (e.g., M101, M31, M42): ");
     io::stdout().flush()?;
@@ -91,7 +91,6 @@ pub fn run_tui(catalogue: &[MessierObject]) -> Result<(), Box<dyn std::error::Er
     let initial = CoordinateEquatorial::new(ra, dec);
     println!("Using initial coordinates: RA={}, Dec={}", initial.ra, initial.dec);
 
-    let image_path = Path::new("camera_img/IMG_8993.CR3");
 
     println!("\nStarting plate solving...");
     let start = Instant::now();
