@@ -172,12 +172,14 @@ dependencies = [
 name = "astro_pi_plate_solving"
 version = "0.1.0"
 dependencies = [
+ "csv",
  "env_logger",
  "image 0.25.9",
  "imageproc",
  "itertools 0.14.0",
  "log",
  "nalgebra 0.33.2",
+ "once_cell",
  "plotters",
  "rawloader",
  "rayon",
