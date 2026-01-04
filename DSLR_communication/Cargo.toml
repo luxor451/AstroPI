@@ -9,7 +9,7 @@ name = "camera_control"
 path = "src/lib.rs"
 
 [[bin]]
-name = "canon_r8_demo"
+name = "camera_control"
 path = "src/main.rs"
 
 [dependencies]

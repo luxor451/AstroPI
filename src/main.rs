@@ -1,5 +1,7 @@
+mod capture_solve;
 mod read_csv;
 mod tui;
+
 
 use read_csv::load_messier_catalogue;
 use tui::run_tui;
@@ -7,7 +9,9 @@ use std::path::Path;
 use astro_pi_plate_solving::{convert_cr3_to_dng, dng_to_png};
 
 
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    
     // Initialize logger - controlled via RUST_LOG env var
     env_logger::init();
 
@@ -35,3 +39,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     run_tui(&catalogue, cr3_path)
 }
 
+// fn main() -> Result<(), Box<dyn std::error::Error>> {
+
+//     use capture_solve::{capture_and_solve, capture_and_solve_quick, make_initial_guess, CaptureSettings, CaptureAndSolveResult};
+//     use camera_control::CameraController;
+//     use crate::{capture_and_solve, make_initial_guess, CaptureSettings};
+
+//     // Connect to camera
+//     let camera = CameraController::connect()?;
+
+//     // Create initial guess (M101 coordinates)
+//     let initial_guess = make_initial_guess(14, 3, 26.0, 54, 20, 57.0);
+
+//     // Capture and solve with custom settings
+//     let settings = CaptureSettings {
+//         iso: 3200,
+//         aperture: None,
+//         exposure_seconds: 10,
+//         save_directory: "/tmp/captures".into(),
+//     };
+
+//     let result = capture_and_solve(&camera, &initial_guess, &settings)?;
+
+//     println!("Actual position: RA={}, Dec={}", 
+//             result.solution.optical_axis_ra, 
+//             result.solution.optical_axis_dec);
+//     Ok(())
+// }
