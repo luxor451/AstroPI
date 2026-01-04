@@ -1,0 +1,16 @@
+[package]
+name = "camera_control"
+version = "0.1.0"
+edition = "2021"
+description = "Camera control library using gphoto2"
+
+[lib]
+name = "camera_control"
+path = "src/lib.rs"
+
+[[bin]]
+name = "canon_r8_demo"
+path = "src/main.rs"
+
+[dependencies]
+gphoto2 = "3.4"
