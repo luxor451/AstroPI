@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Rust Autoguider</title>
+    <style>
+        body { background-color: #121212; color: #e0e0e0; font-family: monospace; text-align: center; margin: 0; padding: 20px; }
+        .dashboard { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; }
+        
+        .panel { 
+            background: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 10px; 
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+
+        /* Camera View */
+        #cam-container { position: relative; width: 640px; height: 480px; background: #000; }
+        img { width: 100%; height: 100%; object-fit: contain; }
+        #crosshair {
+            position: absolute; top: 50%; left: 50%; width: 40px; height: 40px;
+            border: 2px solid #00ff00; transform: translate(-50%, -50%);
+            pointer-events: none;
+            box-shadow: 0 0 5px #00ff00, inset 0 0 5px #00ff00; /* Glow effect */
+        }
+        #selected-star-box {
+            position: absolute;
+            border: 2px solid #ff0000;
+            pointer-events: none;
+            box-shadow: 0 0 5px #ff0000;
+            display: none;
+        }
+        #guide-star-crosshair {
+            position: absolute;
+            pointer-events: none;
+            display: none;
+        }
+        #guide-star-crosshair::before,
+        #guide-star-crosshair::after {
+            content: '';
+            position: absolute;
+            background-color: #00ff00;
+            box-shadow: 0 0 3px #00ff00;
+        }
+        #guide-star-crosshair::before {
+            width: 30px;
+            height: 2px;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+        #guide-star-crosshair::after {
+            width: 2px;
+            height: 30px;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+        .guide-star-marker {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border: 1px solid #ffff00;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            box-shadow: 0 0 3px #ffff00;
+        }
+
+        /* Graph Overlay Data */
+        .stats { position: absolute; top: 10px; right: 10px; text-align: right; background: rgba(0,0,0,0.5); padding: 5px; }
+        .red { color: #ff4444; }
+        .blue { color: #4488ff; }
+        
+        /* Zoom View */
+        .zoom-container { position: relative; width: 200px; height: 200px; background: #000; border: 2px solid #444; }
+        #zoom-container-cg { border-color: #4488ff; }
+        #zoom-container-gf { border-color: #ff8844; }
+        #zoom-container-fgf { border-color: #00ff00; }
+        .zoom-container canvas { width: 100%; height: 100%; image-rendering: pixelated; }
+        .zoom-crosshair-inner {
+            position: absolute; top: 50%; left: 50%; width: 20px; height: 20px;
+            border: 1px solid #00ff00; transform: translate(-50%, -50%);
+            pointer-events: none;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <h1>Rust Autoguider Control</h1>
+    
+    <div class="dashboard">
+        <div class="panel">
+            <div id="cam-container">
+                <img id="cam-feed" src="" alt="Waiting for server..." />
+                <div id="crosshair"></div>
+                <div id="selected-star-box"></div>
+                <div id="guide-star-crosshair"></div>
+                <div id="guide-stars-overlay"></div>
+                <div class="stats">
+                    <div>RA Err: <span id="val-ra" class="red">0.00</span> px</div>
+                    <div>DEC Err: <span id="val-dec" class="blue">0.00</span> px</div>
+                    <div style="margin-top: 5px; border-top: 1px solid #333; padding-top: 5px;">
+                        <div>RA RMS: <span id="val-ra-rms" class="red">0.00</span> px</div>
+                        <div>DEC RMS: <span id="val-dec-rms" class="blue">0.00</span> px</div>
+                        <div style="color: #00ff00; font-weight: bold;">Total RMS: <span id="val-total-rms">0.00</span> px</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel" style="width: 800px; height: 480px;">
+            <canvas id="guideChart"></canvas>
+        </div>
+
+        <div class="panel">
+            <h3 style="margin-top: 0;">Sky Map Overview</h3>
+            <canvas id="skyMapCanvas" width="640" height="480" style="border: 1px solid #444; background: #000;"></canvas>
+        </div>
+        
+        <div class="panel">
+            <h3 style="margin-top: 0; color: #4488ff;">CG (Center of Gravity)</h3>
+            <div id="zoom-container-cg" class="zoom-container">
+                <canvas id="zoom-canvas-cg" width="200" height="200"></canvas>
+                <div class="zoom-crosshair-inner"></div>
+            </div>
+            <div style="margin-top: 10px; font-size: 12px;">
+                <span id="zoom-info-cg">No star</span>
+            </div>
+        </div>
+        
+        <div class="panel">
+            <h3 style="margin-top: 0; color: #ff8844;">GF (Gaussian Fit)</h3>
+            <div id="zoom-container-gf" class="zoom-container">
+                <canvas id="zoom-canvas-gf" width="200" height="200"></canvas>
+                <div class="zoom-crosshair-inner"></div>
+            </div>
+            <div style="margin-top: 10px; font-size: 12px;">
+                <span id="zoom-info-gf">No star</span>
+            </div>
+        </div>
+        
+        <div class="panel">
+            <h3 style="margin-top: 0; color: #00ff00;">FGF (Fast Gaussian) [Active]</h3>
+            <div id="zoom-container-fgf" class="zoom-container">
+                <canvas id="zoom-canvas-fgf" width="200" height="200"></canvas>
+                <div class="zoom-crosshair-inner"></div>
+            </div>
+            <div style="margin-top: 10px; font-size: 12px;">
+                <span id="zoom-info-fgf">No star</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 1. SETUP CHART ---
+        const ctx = document.getElementById('guideChart').getContext('2d');
+        const maxDataPoints = 300; // How much history to keep (increased for longer x-axis)
+        let frameCount = 0;
+
+        const chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [], // X-Axis (Time)
+                datasets: [
+                    { 
+                        label: 'RA (Red)', 
+                        borderColor: '#ff4444', 
+                        backgroundColor: 'rgba(255, 68, 68, 0.1)',
+                        borderWidth: 2,
+                        pointRadius: 0, 
+                        data: [],
+                        tension: 0.4 // Smooth curves
+                    },
+                    { 
+                        label: 'DEC (Blue)', 
+                        borderColor: '#4488ff', 
+                        borderWidth: 2,
+                        pointRadius: 0, 
+                        data: [],
+                        tension: 0.4 
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false, // CRITICAL: Disable animation for real-time performance
+                interaction: { intersect: false },
+                scales: {
+                    x: { display: false }, // Hide bottom labels for speed
+                    y: {
+                        grid: { color: '#333' },
+                        suggestedMin: -2, // Default zoom
+                        suggestedMax: 2
+                    }
+                },
+                plugins: {
+                    legend: { labels: { color: 'white' } }
+                }
+            }
+        });
+
+        // --- 2. WEBSOCKET CONNECTION ---
+        const ws = new WebSocket("ws://" + window.location.host + "/ws");
+        
+        // HTML Elements to update text
+        const txtRa = document.getElementById("val-ra");
+        const txtDec = document.getElementById("val-dec");
+        const txtRaRms = document.getElementById("val-ra-rms");
+        const txtDecRms = document.getElementById("val-dec-rms");
+        const txtTotalRms = document.getElementById("val-total-rms");
+        const img = document.getElementById("cam-feed");
+        const selectedStarBox = document.getElementById("selected-star-box");
+        const guideStarCrosshair = document.getElementById("guide-star-crosshair");
+        const guideStarsOverlay = document.getElementById("guide-stars-overlay");
+        
+        // Zoom view elements for all three algorithms
+        const zoomCanvasCG = document.getElementById("zoom-canvas-cg");
+        const zoomCtxCG = zoomCanvasCG.getContext('2d');
+        const zoomInfoCG = document.getElementById("zoom-info-cg");
+        
+        const zoomCanvasGF = document.getElementById("zoom-canvas-gf");
+        const zoomCtxGF = zoomCanvasGF.getContext('2d');
+        const zoomInfoGF = document.getElementById("zoom-info-gf");
+        
+        const zoomCanvasFGF = document.getElementById("zoom-canvas-fgf");
+        const zoomCtxFGF = zoomCanvasFGF.getContext('2d');
+        const zoomInfoFGF = document.getElementById("zoom-info-fgf");
+        
+        const ZOOM_SIZE = 200; // Size of zoom window
+        const ZOOM_REGION = 40; // Size of region to extract from main image
+        
+        // Sky Map Overview Canvas
+        const skyCanvas = document.getElementById("skyMapCanvas");
+        const skyCtx = skyCanvas.getContext('2d');
+        let skyMapImage = new Image();
+        let currentFOV = { x: 0, y: 0, w: 640, h: 480 };
+        
+        // Load the full sky map
+        skyMapImage.src = '/sky_map.jpg'; // We'll need to serve this
+        skyMapImage.onload = () => {
+            drawSkyMapOverview();
+        };
+        
+        function drawSkyMapOverview() {
+            if (!skyMapImage.complete) return;
+            
+            // Draw the full sky map scaled to fit canvas
+            const scale = Math.min(skyCanvas.width / skyMapImage.width, skyCanvas.height / skyMapImage.height);
+            const scaledW = skyMapImage.width * scale;
+            const scaledH = skyMapImage.height * scale;
+            const offsetX = (skyCanvas.width - scaledW) / 2;
+            const offsetY = (skyCanvas.height - scaledH) / 2;
+            
+            skyCtx.clearRect(0, 0, skyCanvas.width, skyCanvas.height);
+            skyCtx.drawImage(skyMapImage, offsetX, offsetY, scaledW, scaledH);
+            
+            // Draw FOV rectangle
+            const fovX = offsetX + (currentFOV.x * scale);
+            const fovY = offsetY + (currentFOV.y * scale);
+            const fovW = currentFOV.w * scale;
+            const fovH = currentFOV.h * scale;
+            
+            skyCtx.strokeStyle = '#00ff00';
+            skyCtx.lineWidth = 2;
+            skyCtx.strokeRect(fovX, fovY, fovW, fovH);
+            
+            // Draw crosshair at FOV center
+            const centerX = fovX + fovW / 2;
+            const centerY = fovY + fovH / 2;
+            skyCtx.strokeStyle = '#ff0000';
+            skyCtx.lineWidth = 1;
+            skyCtx.beginPath();
+            skyCtx.moveTo(centerX - 10, centerY);
+            skyCtx.lineTo(centerX + 10, centerY);
+            skyCtx.moveTo(centerX, centerY - 10);
+            skyCtx.lineTo(centerX, centerY + 10);
+            skyCtx.stroke();
+        }
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+
+            // A. Update Camera Image
+            img.src = "data:image/jpeg;base64," + data.image_base64;
+
+            // B. Update Text Stats
+            txtRa.innerText = data.ra_error.toFixed(2);
+            txtDec.innerText = data.dec_error.toFixed(2);
+            txtRaRms.innerText = data.ra_rms.toFixed(3);
+            txtDecRms.innerText = data.dec_rms.toFixed(3);
+            txtTotalRms.innerText = data.total_rms.toFixed(3);
+
+            // C. Update selected star box and crosshair (FGF position for tracking)
+            if (data.selected_star_x !== null && data.selected_star_y !== null) {
+                const boxSize = 40;
+                selectedStarBox.style.display = 'block';
+                selectedStarBox.style.left = (data.selected_star_x - boxSize / 2) + 'px';
+                selectedStarBox.style.top = (data.selected_star_y - boxSize / 2) + 'px';
+                selectedStarBox.style.width = boxSize + 'px';
+                selectedStarBox.style.height = boxSize + 'px';
+                
+                // Position guide star crosshair
+                guideStarCrosshair.style.display = 'block';
+                guideStarCrosshair.style.left = data.selected_star_x + 'px';
+                guideStarCrosshair.style.top = data.selected_star_y + 'px';
+            } else {
+                selectedStarBox.style.display = 'none';
+                guideStarCrosshair.style.display = 'none';
+            }
+            
+            // Update all guide stars display
+            guideStarsOverlay.innerHTML = '';  // Clear previous markers
+            if (data.guide_stars && data.guide_stars.length > 0) {
+                data.guide_stars.forEach((star, index) => {
+                    const marker = document.createElement('div');
+                    marker.className = 'guide-star-marker';
+                    marker.style.left = star[0] + 'px';
+                    marker.style.top = star[1] + 'px';
+                    // Add a small number label
+                    marker.innerHTML = `<div style="position: absolute; top: -15px; left: 50%; transform: translateX(-50%); color: #ffff00; font-size: 10px; text-shadow: 0 0 2px #000;">${index + 1}</div>`;
+                    guideStarsOverlay.appendChild(marker);
+                });
+            }
+            
+            // D. Update zoom views for all three algorithms
+            if (data.star_cg_x !== null && data.star_cg_y !== null) {
+                zoomInfoCG.textContent = `(${data.star_cg_x.toFixed(1)}, ${data.star_cg_y.toFixed(1)})`;
+                updateZoomView(zoomCtxCG, data.star_cg_x, data.star_cg_y, '#4488ff');
+            } else {
+                zoomInfoCG.textContent = 'Lost';
+                zoomCtxCG.clearRect(0, 0, ZOOM_SIZE, ZOOM_SIZE);
+            }
+            
+            if (data.star_gf_x !== null && data.star_gf_y !== null) {
+                zoomInfoGF.textContent = `(${data.star_gf_x.toFixed(1)}, ${data.star_gf_y.toFixed(1)})`;
+                updateZoomView(zoomCtxGF, data.star_gf_x, data.star_gf_y, '#ff8844');
+            } else {
+                zoomInfoGF.textContent = 'Lost';
+                zoomCtxGF.clearRect(0, 0, ZOOM_SIZE, ZOOM_SIZE);
+            }
+            
+            if (data.star_fgf_x !== null && data.star_fgf_y !== null) {
+                zoomInfoFGF.textContent = `(${data.star_fgf_x.toFixed(1)}, ${data.star_fgf_y.toFixed(1)})`;
+                updateZoomView(zoomCtxFGF, data.star_fgf_x, data.star_fgf_y, '#00ff00');
+            } else {
+                zoomInfoFGF.textContent = 'Lost';
+                zoomCtxFGF.clearRect(0, 0, ZOOM_SIZE, ZOOM_SIZE);
+            }
+
+            // E. Update Graph Data
+            // We must push a label AND data to keep them in sync
+            frameCount++;
+            chart.data.labels.push(frameCount);
+            chart.data.datasets[0].data.push(data.ra_error);
+            chart.data.datasets[1].data.push(data.dec_error);
+
+            // Scroll: Remove oldest data if we have too much
+            if (chart.data.labels.length > maxDataPoints) {
+                chart.data.labels.shift();
+                chart.data.datasets[0].data.shift();
+                chart.data.datasets[1].data.shift();
+            }
+
+            // Efficient update
+            chart.update('none');
+            
+            // F. Update Sky Map FOV if mount position is available
+            if (data.mount_x !== undefined && data.mount_y !== undefined) {
+                currentFOV.x = data.mount_x - currentFOV.w / 2;
+                currentFOV.y = data.mount_y - currentFOV.h / 2;
+                drawSkyMapOverview();
+            }
+        };
+
+        function updateZoomView(ctx, starX, starY, crosshairColor) {
+            // Clear zoom canvas
+            ctx.clearRect(0, 0, ZOOM_SIZE, ZOOM_SIZE);
+            
+            // Calculate source region (area around the star)
+            const srcX = Math.max(0, starX - ZOOM_REGION / 2);
+            const srcY = Math.max(0, starY - ZOOM_REGION / 2);
+            const srcW = ZOOM_REGION;
+            const srcH = ZOOM_REGION;
+            
+            // Draw the zoomed region once image is loaded
+            img.decode().then(() => {
+                ctx.imageSmoothingEnabled = false; // Pixelated zoom
+                ctx.drawImage(
+                    img,
+                    srcX, srcY, srcW, srcH,  // Source rectangle
+                    0, 0, ZOOM_SIZE, ZOOM_SIZE  // Destination rectangle (scaled up)
+                );
+                
+                // Calculate where the star appears in the zoomed canvas
+                const starPosInZoomX = ((starX - srcX) / srcW) * ZOOM_SIZE;
+                const starPosInZoomY = ((starY - srcY) / srcH) * ZOOM_SIZE;
+                
+                // Draw crosshair at the tracked star position
+                ctx.strokeStyle = crosshairColor;
+                ctx.lineWidth = 2;
+                ctx.shadowColor = crosshairColor;
+                ctx.shadowBlur = 5;
+                
+                const crosshairSize = 15;
+                
+                // Horizontal line
+                ctx.beginPath();
+                ctx.moveTo(starPosInZoomX - crosshairSize, starPosInZoomY);
+                ctx.lineTo(starPosInZoomX + crosshairSize, starPosInZoomY);
+                ctx.stroke();
+                
+                // Vertical line
+                ctx.beginPath();
+                ctx.moveTo(starPosInZoomX, starPosInZoomY - crosshairSize);
+                ctx.lineTo(starPosInZoomX, starPosInZoomY + crosshairSize);
+                ctx.stroke();
+                
+                ctx.shadowBlur = 0;
+            }).catch(() => {
+                // Image not ready yet, will retry on next frame
+            });
+        }
+        
+        ws.onclose = () => {
+            console.log("Disconnected from server");
+            document.querySelector("h1").innerText = "❌ Disconnected (Restart Server)";
+        };
+    </script>
+</body>
+</html>
