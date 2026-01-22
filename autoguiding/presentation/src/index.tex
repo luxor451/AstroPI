@@ -106,7 +106,7 @@
     \begin{block}{Star Image Model}
         The intensity distribution of a star can be modelled as a 2D Gaussian:
         \[
-        S(x_i, y_i | v) = A \exp\left(-\frac{(x_i-x_c)^2}{2 \sigma_x^2} + \frac{(y_i-y_c)^2}{2\sigma_y^2}\right) + N
+        S(x_i, y_i | v) = A \exp\left(-\frac{(x_i-x_c)^2}{2 \sigma_x^2} + \frac{(y_i-y_c)^2}{2\sigma_y^2}\right) 
         \]
         where v = $(A, x_c, y_c, \sigma_x, \sigma_y, N)$:
         \begin{itemize} 
@@ -214,7 +214,7 @@
         \vspace{0.3cm}
         \textbf{Transformation:} Apply natural logarithm to the image model.
         \[
-            g_i = \ln I(x_i, y_i) \approx \ln S(x_i, y_i)
+            g_i = \ln I(x_i, y_i) - \ln S(x_i, y_i)
         \]
         
         \textbf{New Objective Function ($G$):}
@@ -570,7 +570,7 @@
 % ============================================
 \begin{frame}{Conclusion}
     \begin{block}{Summary}
-        The proposed \textbf{Weighted Fast Gaussian Fitting (FGF)} algorithm solves the bias problem of standard linearization by introducing a \textbf{two-step SNR-weighted approach}.
+        The proposed \textbf{Fast Gaussian Fitting (FGF)} algorithm solves the bias problem of standard linearization by introducing a \textbf{two-step SNR-weighted approach}.
     \end{block}
     
     \vspace{0.3cm}
@@ -897,14 +897,10 @@
 
         \item \textbf{Advanced Filtering:}
         \begin{itemize}
-            \item Replace the simple Low Pass Filter with a \textbf{Kalman Filter}.
+            \item Replace the simple controller with a \textbf{Kalman Filter}.
             \item Would allow predictive tracking of periodic errors (PE) rather than just reactive smoothing.
         \end{itemize}
         
-        \item \textbf{Autotuning:}
-        \begin{itemize}
-            \item Implement algorithms (e.g., Ziegler-Nichols) to automatically optimize PID constants ($K_p, K_i, K_d$) for different mount loads.
-        \end{itemize}
     \end{itemize}
 \end{frame}
 
