@@ -1,19 +1,102 @@
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
     <title>Rust Autoguider</title>
     <style>
+        * { box-sizing: border-box; }
         body { background-color: #121212; color: #e0e0e0; font-family: monospace; text-align: center; margin: 0; padding: 20px; }
-        .dashboard { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; }
+        
+        .dashboard { 
+            display: grid; 
+            grid-template-columns: 672px 1fr 380px;
+            grid-template-rows: auto auto auto;
+            gap: 15px; 
+            max-width: 1800px; 
+            margin: 0 auto;
+            align-items: start;
+        }
         
         .panel { 
-            background: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 10px; 
+            background: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px; 
             box-shadow: 0 4px 6px rgba(0,0,0,0.3);
         }
+        
+        /* Camera panel - first column, first row */
+        .panel-camera { 
+            grid-column: 1; 
+            grid-row: 1;
+        }
+        
+        /* Chart panel - second column, first row */
+        .panel-chart { 
+            grid-column: 2; 
+            grid-row: 1;
+            height: 510px;
+        }
+        
+        /* Debug panel - third column, first row */
+        .panel-debug { 
+            grid-column: 3; 
+            grid-row: 1;
+        }
+        
+        /* Algorithm panels row - spans all columns, second row */
+        .algorithm-row {
+            display: flex;
+            gap: 15px;
+            grid-column: 1 / -1;
+            grid-row: 2;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .algorithm-panel {
+            background: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            width: 280px;
+            text-align: left;
+            flex-shrink: 0;
+        }
+        .algorithm-panel h3 { margin: 0 0 10px 0; text-align: center; font-size: 14px; }
+        .algorithm-stats {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 4px 10px;
+            font-size: 11px;
+            margin-top: 10px;
+            padding: 8px;
+            background: #0a0a0a;
+            border-radius: 4px;
+        }
+        .algorithm-stats .label { color: #888; }
+        .algorithm-stats .value { text-align: right; font-family: monospace; }
+        
+        /* Sky map - spans all columns, third row */
+        .panel-skymap {
+            grid-column: 1 / -1;
+            grid-row: 3;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        .panel-skymap canvas {
+            width: 100%;
+            height: 250px;
+        }
 
-        /* Camera View */
-        #cam-container { position: relative; width: 640px; height: 480px; background: #000; }
-        img { width: 100%; height: 100%; object-fit: contain; }
+        /* Chart canvas fills its container */
+        .panel-chart {
+            display: flex;
+            flex-direction: column;
+        }
+        .panel-chart canvas {
+            flex: 1;
+            width: 100% !important;
+            height: 100% !important;
+        }
+
+        /* Camera View - image is 2560x1920 but displayed at 640x480 */
+        #cam-container { position: relative; width: 640px; height: 480px; background: #000; margin: 0 auto; overflow: hidden; }
+        img { width: 640px; height: 480px; object-fit: contain; }
         #crosshair {
             position: absolute; top: 50%; left: 50%; width: 40px; height: 40px;
             border: 2px solid #00ff00; transform: translate(-50%, -50%);
@@ -80,14 +163,105 @@
             border: 1px solid #00ff00; transform: translate(-50%, -50%);
             pointer-events: none;
         }
+        
+        /* Debug Console */
+        .debug-console {
+            text-align: left;
+        }
+        .debug-console h3 {
+            margin: 0 0 10px 0;
+            color: #00ff00;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .debug-console h3::before {
+            content: '●';
+            animation: blink 1s infinite;
+        }
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0.3; }
+        }
+        #debug-output {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 4px;
+            padding: 12px;
+            height: 440px;
+            overflow-y: auto;
+            font-size: 11px;
+            line-height: 1.4;
+            white-space: pre;
+            color: #00ff00;
+            text-shadow: 0 0 2px #00ff00;
+        }
+        
+        /* Responsive: stack on smaller screens */
+        @media (max-width: 1400px) {
+            .dashboard {
+                grid-template-columns: 1fr 1fr;
+            }
+            .panel-camera { grid-column: 1; grid-row: 1; }
+            .panel-chart { grid-column: 2; grid-row: 1; height: 510px; }
+            .panel-debug { grid-column: 1 / -1; grid-row: 2; }
+            .panel-debug #debug-output { height: 150px; }
+            .algorithm-row { grid-row: 3; }
+            .panel-skymap { grid-row: 4; }
+        }
+        @media (max-width: 1000px) {
+            .dashboard {
+                grid-template-columns: 1fr;
+            }
+            .panel-camera, .panel-chart, .panel-debug { grid-column: 1; }
+            .panel-camera { grid-row: 1; }
+            .panel-chart { grid-row: 2; height: 300px; }
+            .panel-debug { grid-row: 3; }
+            .algorithm-row { grid-row: 4; }
+            .panel-skymap { grid-row: 5; }
+        }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
     <h1>Rust Autoguider Control</h1>
     
+    <!-- Control Buttons -->
+    <div style="margin-bottom: 15px;">
+        <button id="btn-start" onclick="sendCommand('start')" style="
+            padding: 12px 30px; 
+            font-size: 16px; 
+            font-weight: bold;
+            background: #2e7d32; 
+            color: white; 
+            border: none; 
+            border-radius: 6px; 
+            cursor: pointer;
+            margin-right: 10px;
+        ">▶ Start Guiding</button>
+        <button id="btn-stop" onclick="sendCommand('stop')" style="
+            padding: 12px 30px; 
+            font-size: 16px; 
+            font-weight: bold;
+            background: #c62828; 
+            color: white; 
+            border: none; 
+            border-radius: 6px; 
+            cursor: pointer;
+        " disabled>⏹ Stop Guiding</button>
+        <span id="status-indicator" style="
+            margin-left: 20px;
+            padding: 8px 16px;
+            border-radius: 4px;
+            font-weight: bold;
+            background: #424242;
+            color: #888;
+        ">IDLE</span>
+    </div>
+    
     <div class="dashboard">
-        <div class="panel">
+        <!-- Row 1: Camera, Chart, Debug -->
+        <div class="panel panel-camera">
             <div id="cam-container">
                 <img id="cam-feed" src="" alt="Waiting for server..." />
                 <div id="crosshair"></div>
@@ -106,46 +280,70 @@
             </div>
         </div>
 
-        <div class="panel" style="width: 800px; height: 480px;">
+        <div class="panel panel-chart">
             <canvas id="guideChart"></canvas>
         </div>
 
-        <div class="panel">
+        <div class="panel panel-debug debug-console">
+            <h3>Live Telemetry</h3>
+            <div id="debug-output">Waiting for data...</div>
+        </div>
+        
+        <!-- Algorithm Panels Row -->
+        <div class="algorithm-row">
+            <div class="algorithm-panel">
+                <h3 style="color: #4488ff;">CG (Center of Gravity)</h3>
+                <div id="zoom-container-cg" class="zoom-container" style="margin: 0 auto;">
+                    <canvas id="zoom-canvas-cg" width="200" height="200"></canvas>
+                    <div class="zoom-crosshair-inner"></div>
+                </div>
+                <div class="algorithm-stats">
+                    <span class="label">Position:</span>
+                    <span class="value" id="cg-pos" style="color: #4488ff;">--</span>
+                    <span class="label">Δ from init:</span>
+                    <span class="value" id="cg-delta">--</span>
+                    <span class="label">Time:</span>
+                    <span class="value" id="cg-time">--</span>
+                </div>
+            </div>
+            
+            <div class="algorithm-panel">
+                <h3 style="color: #ff8844;">GF (Gaussian Fit)</h3>
+                <div id="zoom-container-gf" class="zoom-container" style="margin: 0 auto;">
+                    <canvas id="zoom-canvas-gf" width="200" height="200"></canvas>
+                    <div class="zoom-crosshair-inner"></div>
+                </div>
+                <div class="algorithm-stats">
+                    <span class="label">Position:</span>
+                    <span class="value" id="gf-pos" style="color: #ff8844;">--</span>
+                    <span class="label">Δ from init:</span>
+                    <span class="value" id="gf-delta">--</span>
+                    <span class="label">Time:</span>
+                    <span class="value" id="gf-time">--</span>
+                </div>
+            </div>
+            
+            <div class="algorithm-panel">
+                <h3 style="color: #00ff00;">FGF (Fast Gaussian) ✓</h3>
+                <div id="zoom-container-fgf" class="zoom-container" style="margin: 0 auto;">
+                    <canvas id="zoom-canvas-fgf" width="200" height="200"></canvas>
+                    <div class="zoom-crosshair-inner"></div>
+                </div>
+                <div class="algorithm-stats">
+                    <span class="label">Position:</span>
+                    <span class="value" id="fgf-pos" style="color: #00ff00;">--</span>
+                    <span class="label">Δ from init:</span>
+                    <span class="value" id="fgf-delta">--</span>
+                    <span class="label">Time:</span>
+                    <span class="value" id="fgf-time">--</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Row 3: Sky Map -->
+        <div class="panel panel-skymap">
             <h3 style="margin-top: 0;">Sky Map Overview</h3>
-            <canvas id="skyMapCanvas" width="640" height="480" style="border: 1px solid #444; background: #000;"></canvas>
-        </div>
-        
-        <div class="panel">
-            <h3 style="margin-top: 0; color: #4488ff;">CG (Center of Gravity)</h3>
-            <div id="zoom-container-cg" class="zoom-container">
-                <canvas id="zoom-canvas-cg" width="200" height="200"></canvas>
-                <div class="zoom-crosshair-inner"></div>
-            </div>
-            <div style="margin-top: 10px; font-size: 12px;">
-                <span id="zoom-info-cg">No star</span>
-            </div>
-        </div>
-        
-        <div class="panel">
-            <h3 style="margin-top: 0; color: #ff8844;">GF (Gaussian Fit)</h3>
-            <div id="zoom-container-gf" class="zoom-container">
-                <canvas id="zoom-canvas-gf" width="200" height="200"></canvas>
-                <div class="zoom-crosshair-inner"></div>
-            </div>
-            <div style="margin-top: 10px; font-size: 12px;">
-                <span id="zoom-info-gf">No star</span>
-            </div>
-        </div>
-        
-        <div class="panel">
-            <h3 style="margin-top: 0; color: #00ff00;">FGF (Fast Gaussian) [Active]</h3>
-            <div id="zoom-container-fgf" class="zoom-container">
-                <canvas id="zoom-canvas-fgf" width="200" height="200"></canvas>
-                <div class="zoom-crosshair-inner"></div>
-            </div>
-            <div style="margin-top: 10px; font-size: 12px;">
-                <span id="zoom-info-fgf">No star</span>
-            </div>
+            <canvas id="skyMapCanvas" width="800" height="250" style="border: 1px solid #444; background: #000;"></canvas>
         </div>
     </div>
 
@@ -201,6 +399,37 @@
         // --- 2. WEBSOCKET CONNECTION ---
         const ws = new WebSocket("ws://" + window.location.host + "/ws");
         
+        // Control buttons
+        const btnStart = document.getElementById("btn-start");
+        const btnStop = document.getElementById("btn-stop");
+        const statusIndicator = document.getElementById("status-indicator");
+        
+        function sendCommand(cmd) {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ command: cmd }));
+            }
+        }
+        
+        function updateGuidingState(isGuiding) {
+            if (isGuiding) {
+                btnStart.disabled = true;
+                btnStart.style.opacity = "0.5";
+                btnStop.disabled = false;
+                btnStop.style.opacity = "1";
+                statusIndicator.textContent = "GUIDING";
+                statusIndicator.style.background = "#2e7d32";
+                statusIndicator.style.color = "white";
+            } else {
+                btnStart.disabled = false;
+                btnStart.style.opacity = "1";
+                btnStop.disabled = true;
+                btnStop.style.opacity = "0.5";
+                statusIndicator.textContent = "IDLE";
+                statusIndicator.style.background = "#424242";
+                statusIndicator.style.color = "#888";
+            }
+        }
+        
         // HTML Elements to update text
         const txtRa = document.getElementById("val-ra");
         const txtDec = document.getElementById("val-dec");
@@ -215,18 +444,27 @@
         // Zoom view elements for all three algorithms
         const zoomCanvasCG = document.getElementById("zoom-canvas-cg");
         const zoomCtxCG = zoomCanvasCG.getContext('2d');
-        const zoomInfoCG = document.getElementById("zoom-info-cg");
+        const cgPos = document.getElementById("cg-pos");
+        const cgDelta = document.getElementById("cg-delta");
+        const cgTime = document.getElementById("cg-time");
         
         const zoomCanvasGF = document.getElementById("zoom-canvas-gf");
         const zoomCtxGF = zoomCanvasGF.getContext('2d');
-        const zoomInfoGF = document.getElementById("zoom-info-gf");
+        const gfPos = document.getElementById("gf-pos");
+        const gfDelta = document.getElementById("gf-delta");
+        const gfTime = document.getElementById("gf-time");
         
         const zoomCanvasFGF = document.getElementById("zoom-canvas-fgf");
         const zoomCtxFGF = zoomCanvasFGF.getContext('2d');
-        const zoomInfoFGF = document.getElementById("zoom-info-fgf");
+        const fgfPos = document.getElementById("fgf-pos");
+        const fgfDelta = document.getElementById("fgf-delta");
+        const fgfTime = document.getElementById("fgf-time");
+        
+        const debugOutput = document.getElementById("debug-output");
         
         const ZOOM_SIZE = 200; // Size of zoom window
-        const ZOOM_REGION = 40; // Size of region to extract from main image
+        const ZOOM_REGION = 31; // Size of region to extract from main image
+        const CAM_SCALE = 2;   // Camera upscaling factor (must match Rust CAM_SCALE)
         
         // Sky Map Overview Canvas
         const skyCanvas = document.getElementById("skyMapCanvas");
@@ -278,6 +516,9 @@
 
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
+            
+            // Update guiding state from server
+            updateGuidingState(data.is_guiding);
 
             // A. Update Camera Image
             img.src = "data:image/jpeg;base64," + data.image_base64;
@@ -288,20 +529,28 @@
             txtRaRms.innerText = data.ra_rms.toFixed(3);
             txtDecRms.innerText = data.dec_rms.toFixed(3);
             txtTotalRms.innerText = data.total_rms.toFixed(3);
+            
+            // Update debug console with live telemetry
+            if (data.debug_log) {
+                debugOutput.textContent = data.debug_log;
+            }
 
             // C. Update selected star box and crosshair (FGF position for tracking)
+            // Note: star positions are in upscaled coordinates, divide by CAM_SCALE for display
             if (data.selected_star_x !== null && data.selected_star_y !== null) {
                 const boxSize = 40;
+                const displayX = data.selected_star_x / CAM_SCALE;
+                const displayY = data.selected_star_y / CAM_SCALE;
                 selectedStarBox.style.display = 'block';
-                selectedStarBox.style.left = (data.selected_star_x - boxSize / 2) + 'px';
-                selectedStarBox.style.top = (data.selected_star_y - boxSize / 2) + 'px';
+                selectedStarBox.style.left = (displayX - boxSize / 2) + 'px';
+                selectedStarBox.style.top = (displayY - boxSize / 2) + 'px';
                 selectedStarBox.style.width = boxSize + 'px';
                 selectedStarBox.style.height = boxSize + 'px';
                 
                 // Position guide star crosshair
                 guideStarCrosshair.style.display = 'block';
-                guideStarCrosshair.style.left = data.selected_star_x + 'px';
-                guideStarCrosshair.style.top = data.selected_star_y + 'px';
+                guideStarCrosshair.style.left = displayX + 'px';
+                guideStarCrosshair.style.top = displayY + 'px';
             } else {
                 selectedStarBox.style.display = 'none';
                 guideStarCrosshair.style.display = 'none';
@@ -313,38 +562,51 @@
                 data.guide_stars.forEach((star, index) => {
                     const marker = document.createElement('div');
                     marker.className = 'guide-star-marker';
-                    marker.style.left = star[0] + 'px';
-                    marker.style.top = star[1] + 'px';
+                    marker.style.left = (star[0] / CAM_SCALE) + 'px';
+                    marker.style.top = (star[1] / CAM_SCALE) + 'px';
                     // Add a small number label
                     marker.innerHTML = `<div style="position: absolute; top: -15px; left: 50%; transform: translateX(-50%); color: #ffff00; font-size: 10px; text-shadow: 0 0 2px #000;">${index + 1}</div>`;
                     guideStarsOverlay.appendChild(marker);
                 });
             }
             
-            // D. Update zoom views for all three algorithms
+            // D. Update zoom views and stats for all three algorithms
+            // Note: positions are in upscaled coords - pass directly to zoom (it extracts from upscaled image)
+            // but divide by CAM_SCALE for display text
             if (data.star_cg_x !== null && data.star_cg_y !== null) {
-                zoomInfoCG.textContent = `(${data.star_cg_x.toFixed(1)}, ${data.star_cg_y.toFixed(1)})`;
+                cgPos.textContent = `(${(data.star_cg_x / CAM_SCALE).toFixed(1)}, ${(data.star_cg_y / CAM_SCALE).toFixed(1)})`;
                 updateZoomView(zoomCtxCG, data.star_cg_x, data.star_cg_y, '#4488ff');
             } else {
-                zoomInfoCG.textContent = 'Lost';
+                cgPos.textContent = 'Lost';
+                cgDelta.textContent = '--';
                 zoomCtxCG.clearRect(0, 0, ZOOM_SIZE, ZOOM_SIZE);
             }
             
             if (data.star_gf_x !== null && data.star_gf_y !== null) {
-                zoomInfoGF.textContent = `(${data.star_gf_x.toFixed(1)}, ${data.star_gf_y.toFixed(1)})`;
+                gfPos.textContent = `(${(data.star_gf_x / CAM_SCALE).toFixed(1)}, ${(data.star_gf_y / CAM_SCALE).toFixed(1)})`;
                 updateZoomView(zoomCtxGF, data.star_gf_x, data.star_gf_y, '#ff8844');
             } else {
-                zoomInfoGF.textContent = 'Lost';
+                gfPos.textContent = 'Lost';
+                gfDelta.textContent = '--';
                 zoomCtxGF.clearRect(0, 0, ZOOM_SIZE, ZOOM_SIZE);
             }
             
             if (data.star_fgf_x !== null && data.star_fgf_y !== null) {
-                zoomInfoFGF.textContent = `(${data.star_fgf_x.toFixed(1)}, ${data.star_fgf_y.toFixed(1)})`;
+                fgfPos.textContent = `(${(data.star_fgf_x / CAM_SCALE).toFixed(1)}, ${(data.star_fgf_y / CAM_SCALE).toFixed(1)})`;
                 updateZoomView(zoomCtxFGF, data.star_fgf_x, data.star_fgf_y, '#00ff00');
             } else {
-                zoomInfoFGF.textContent = 'Lost';
+                fgfPos.textContent = 'Lost';
+                fgfDelta.textContent = '--';
                 zoomCtxFGF.clearRect(0, 0, ZOOM_SIZE, ZOOM_SIZE);
             }
+            
+            // Update delta and timing from debug data (parse from debug_log or add to telemetry)
+            if (data.cg_time !== undefined) cgTime.textContent = data.cg_time + 'µs';
+            if (data.gf_time !== undefined) gfTime.textContent = data.gf_time + 'µs';
+            if (data.fgf_time !== undefined) fgfTime.textContent = data.fgf_time + 'µs';
+            if (data.cg_delta !== undefined) cgDelta.textContent = data.cg_delta;
+            if (data.gf_delta !== undefined) gfDelta.textContent = data.gf_delta;
+            if (data.fgf_delta !== undefined) fgfDelta.textContent = data.fgf_delta;
 
             // E. Update Graph Data
             // We must push a label AND data to keep them in sync
@@ -375,18 +637,21 @@
             // Clear zoom canvas
             ctx.clearRect(0, 0, ZOOM_SIZE, ZOOM_SIZE);
             
-            // Calculate source region (area around the star)
-            const srcX = Math.max(0, starX - ZOOM_REGION / 2);
-            const srcY = Math.max(0, starY - ZOOM_REGION / 2);
-            const srcW = ZOOM_REGION;
-            const srcH = ZOOM_REGION;
+            // Scale ZOOM_REGION for upscaled image coordinates
+            const scaledZoomRegion = ZOOM_REGION * CAM_SCALE;
+            
+            // Calculate source region (area around the star in upscaled image coords)
+            const srcX = Math.max(0, starX - scaledZoomRegion / 2);
+            const srcY = Math.max(0, starY - scaledZoomRegion / 2);
+            const srcW = scaledZoomRegion;
+            const srcH = scaledZoomRegion;
             
             // Draw the zoomed region once image is loaded
             img.decode().then(() => {
                 ctx.imageSmoothingEnabled = false; // Pixelated zoom
                 ctx.drawImage(
                     img,
-                    srcX, srcY, srcW, srcH,  // Source rectangle
+                    srcX, srcY, srcW, srcH,  // Source rectangle (upscaled coords)
                     0, 0, ZOOM_SIZE, ZOOM_SIZE  // Destination rectangle (scaled up)
                 );
                 
@@ -422,7 +687,7 @@
         
         ws.onclose = () => {
             console.log("Disconnected from server");
-            document.querySelector("h1").innerText = "❌ Disconnected (Restart Server)";
+            document.querySelector("h1").innerText = "Disconnected (Restart Server)";
         };
     </script>
 </body>
