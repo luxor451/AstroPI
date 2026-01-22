@@ -108,7 +108,7 @@
         \[
         S(x_i, y_i | v) = A \exp\left(-\frac{(x_i-x_c)^2}{2 \sigma_x^2} + \frac{(y_i-y_c)^2}{2\sigma_y^2}\right) 
         \]
-        where v = $(A, x_c, y_c, \sigma_x, \sigma_y, N)$:
+        where v = $(A, x_c, y_c, \sigma_x, \sigma_y)$:
         \begin{itemize} 
             \item $(x_c, y_c)$ = star centroid (what we want to find)
             \item $A$ = Brightness of star (peak intensity)
@@ -899,6 +899,12 @@
         \begin{itemize}
             \item Replace the simple controller with a \textbf{Kalman Filter}.
             \item Would allow predictive tracking of periodic errors (PE) rather than just reactive smoothing.
+        \end{itemize}
+
+        \item \textbf{Dithering Support:}
+        \begin{itemize}
+            \item Implement automatic dithering between exposures to reduce fixed-pattern noise in astrophotography.
+            \item Requires coordination between the main imaging scope and the guide scope.
         \end{itemize}
         
     \end{itemize}
