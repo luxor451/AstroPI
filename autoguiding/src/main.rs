@@ -14,6 +14,7 @@ use axum::{
     routing::get,
     Router,
 };
+
 use base64::Engine as _;
 use image::codecs::jpeg::JpegEncoder;
 use serde::{Deserialize, Serialize};
@@ -23,7 +24,8 @@ use tokio::sync::{broadcast, mpsc};
 use tower_http::services::ServeFile;
 
 use crate::r#const::{
-    CAM_H, CAM_SCALE, CAM_W, MAX_CORRECTION, NB_STARS, RMS_WINDOW_SIZE, START_X, START_Y, T, MAX_DEVIATION,
+    CAM_H, CAM_SCALE, CAM_W, MAX_CORRECTION, MAX_DEVIATION, NB_STARS, RMS_WINDOW_SIZE, START_X,
+    START_Y, T,
 };
 
 // Commands from UI to guider
@@ -157,7 +159,7 @@ fn guide_mount(
     guider: &mut guider::Guider,
     w: u32,
     h: u32,
-    gray_pixels: &Vec<u8>,
+    gray_pixels: &[u8],
     tracked_stars: &mut Vec<guider::StarPosition>,
     tracked_original_indices: &mut Vec<usize>,
 ) -> (f64, f64) {
@@ -165,7 +167,7 @@ fn guide_mount(
 
     // Track each guide star
     for (idx, star) in search_positions.iter().enumerate() {
-        if let Some(s) = guider.find_star_FGF(w, h, &gray_pixels, *star, T) {
+        if let Some(s) = guider.find_star_FGF(w, h, gray_pixels, *star, T) {
             tracked_stars.push(s);
             tracked_original_indices.push(idx);
         }
@@ -198,7 +200,7 @@ fn guide_mount(
         (0.0, 0.0)
     };
 
-    return correction;
+    correction
 }
 
 // --- SIMULATION LOOP ---

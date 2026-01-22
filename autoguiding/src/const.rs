@@ -10,7 +10,6 @@ pub const RMS_WINDOW_SIZE: usize = 100; // RMS tracking - sliding window of last
 pub const MAX_CORRECTION: f64 = 5.0; // Outlier rejection - max correction in pixels per frame
 pub const MAX_DEVIATION: f64 = 3.0; // Max deviation from median in pixels for outlier rejection
 
-
 // Control constants for the close loop guider
 pub const KP_RA: f64 = 2.0;
 pub const KI_RA: f64 = 0.8;

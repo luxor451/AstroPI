@@ -1,10 +1,10 @@
+use crate::r#const::CAM_SCALE;
 use crate::traits::{Camera, MountDriver};
 use image::GenericImageView;
 use image::Pixel;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::f64::consts::PI;
-use crate::r#const::{CAM_SCALE};
 pub struct SimMount {
     pub x: f64,
     pub y: f64,

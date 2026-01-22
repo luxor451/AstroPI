@@ -190,7 +190,6 @@ impl Guider {
         let edge_margin = 40.0; // Minimum distance from frame edges
         let min_selected_separation = 80.0; // Minimum distance between selected stars
 
-
         // Find all bright pixel clusters (potential stars)
         let mut star_candidates: Vec<(f64, f64, f64)> = Vec::new(); // (x, y, total_brightness)
 
@@ -341,9 +340,7 @@ impl Guider {
         // This ensures initial positions match what FGF will find during tracking
         self.guide_stars = cg_positions
             .iter()
-            .filter_map(|cg_pos| {
-                self.find_star_FGF(width, height, pixels, *cg_pos, T)
-            })
+            .filter_map(|cg_pos| self.find_star_FGF(width, height, pixels, *cg_pos, T))
             .collect();
 
         // Store initial positions

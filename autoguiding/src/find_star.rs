@@ -34,14 +34,14 @@ fn get_window(
 }
 
 fn exp(x: f64) -> f64 {
-    return x.exp();
+    x.exp()
 }
 
 #[allow(non_snake_case)]
 fn S(x_i: u32, y_i: u32, v: (f64, f64, f64, f64, f64)) -> f64 {
     let (A, x_c, y_c, sigma_x, sigma_y) = v;
-    return A * exp(-((x_i as f64 - x_c).powi(2) / (2.0 * sigma_x.powi(2)))
-        - ((y_i as f64 - y_c).powi(2) / (2.0 * sigma_y.powi(2))));
+    A * exp(-((x_i as f64 - x_c).powi(2) / (2.0 * sigma_x.powi(2)))
+        - ((y_i as f64 - y_c).powi(2) / (2.0 * sigma_y.powi(2))))
 }
 
 fn z_i(
@@ -52,7 +52,7 @@ fn z_i(
     threshold: u8,
 ) -> f64 {
     let measured = (window_pixels[y_i as usize][x_i as usize] as f64 - threshold as f64).max(0.0);
-    return measured - S(x_i, y_i, v);
+    measured - S(x_i, y_i, v)
 }
 
 #[allow(non_snake_case)]
@@ -69,7 +69,7 @@ fn obj_function(
             sum += z * z;
         }
     }
-    return sum;
+    sum
 }
 
 // Optimization problem for argmin
@@ -105,22 +105,18 @@ impl Guider {
     ) -> Option<StarPosition> {
         // This need to be big enough so that the star does not move out of the window between frames
         let window_size = 31;
-        let window_pixels = get_window(width, height, pixels, window_size as u32, old_star_pos);
+        let window_pixels: Vec<Vec<u8>> =
+            get_window(width, height, pixels, window_size as u32, old_star_pos);
 
         let mut x_c = 0.0;
         let mut y_c = 0.0;
         let mut sum_I = 0.0;
 
-        for y in 0..window_size {
-            for x in 0..window_size {
-                let I_i = window_pixels[y][x] as f64;
-
-                if I_i > self.threshold as f64 {
-                    let intensity = I_i - self.threshold as f64;
-                    x_c += (x as f64) * intensity;
-                    y_c += (y as f64) * intensity;
-                    sum_I += intensity;
-                }
+        for (y, window_slice) in window_pixels.iter().enumerate() {
+            for (x, &I_i) in window_slice.iter().enumerate() {
+                x_c += (x as f64) * I_i as f64;
+                y_c += (y as f64) * I_i as f64;
+                sum_I += I_i as f64;
             }
         }
 
@@ -128,8 +124,8 @@ impl Guider {
             return None; // No bright pixels found
         }
 
-        x_c = x_c / sum_I;
-        y_c = y_c / sum_I;
+        x_c /= sum_I;
+        y_c /= sum_I;
 
         Some(StarPosition {
             x: old_star_pos.x - (window_size as f64 / 2.0) + x_c,
@@ -331,10 +327,9 @@ impl Guider {
     }
 
     #[allow(non_snake_case)]
-    fn S_i(x_i: f64, y_i: f64, A: f64, x_c: f64, y_c: f64, sigma_x: f64, sigma_y: f64) -> f64 {
-        let res = A * exp(-((x_i as f64 - x_c).powi(2) / (2.0 * sigma_x.powi(2)))
-            - ((y_i as f64 - y_c).powi(2) / (2.0 * sigma_y.powi(2))));
-        res
+    fn S_i(x_i: f64, y_i: f64, (A, x_c, y_c, sigma_x, sigma_y): (f64, f64, f64, f64, f64)) -> f64 {
+        A * exp(-((x_i - x_c).powi(2) / (2.0 * sigma_x.powi(2)))
+            - ((y_i - y_c).powi(2) / (2.0 * sigma_y.powi(2))))
     }
 
     #[allow(non_snake_case)]
@@ -342,14 +337,10 @@ impl Guider {
         x_i: f64,
         y_i: f64,
         I: &[Vec<u8>],
-        A: f64,
-        x_c: f64,
-        y_c: f64,
-        sigma_x: f64,
-        sigma_y: f64,
+        (A, x_c, y_c, sigma_x, sigma_y): (f64, f64, f64, f64, f64),
     ) -> f64 {
-        return (I[y_i as usize][x_i as usize] as f64)
-            - Self::S_i(x_i, y_i, A, x_c, y_c, sigma_x, sigma_y);
+        (I[y_i as usize][x_i as usize] as f64)
+            - Self::S_i(x_i, y_i, (A, x_c, y_c, sigma_x, sigma_y))
     }
 
     #[allow(non_snake_case)]
@@ -357,18 +348,15 @@ impl Guider {
         x_i: f64,
         y_i: f64,
         window_pixels: &[Vec<u8>],
-        A: f64,
-        x_c: f64,
-        y_c: f64,
-        sigma_x: f64,
-        sigma_y: f64,
+        (A, x_c, y_c, sigma_x, sigma_y): (f64, f64, f64, f64, f64),
     ) -> f64 {
-        let S = Self::S_i(x_i, y_i, A, x_c, y_c, sigma_x, sigma_y);
-        let N = Self::N_i(x_i, y_i, window_pixels, A, x_c, y_c, sigma_x, sigma_y);
+        let v = (A, x_c, y_c, sigma_x, sigma_y);
+        let S = Self::S_i(x_i, y_i, v);
+        let N = Self::N_i(x_i, y_i, window_pixels, v);
         if N == 0.0 {
             return 0.0;
         }
-        return (S / N).abs();
+        (S / N).abs()
     }
 
     #[allow(non_snake_case)]
@@ -386,14 +374,12 @@ impl Guider {
         // (1)
         let window_pixels = get_window(width, height, pixels, window_size, old_star_pos);
 
-        // (2) Find positions of brightest pixels above threshold
+        // (2) Find positions of brightest pixels above
         let mut pixel_positions: Vec<(u8, usize, usize)> = Vec::new();
-        for y in 0..window_size as usize {
-            for x in 0..window_size as usize {
-                let intensity = window_pixels[y][x];
-                if intensity > self.threshold {
-                    pixel_positions.push((intensity, x, y));
-                }
+
+        for (y, window_slice) in window_pixels.iter().enumerate() {
+            for (x, intensity) in window_slice.iter().enumerate() {
+                pixel_positions.push((*intensity, x, y));
             }
         }
 
@@ -404,7 +390,7 @@ impl Guider {
 
         // (2) (i) Use top 30% of bright pixels for initial fit (more robust than just 5)
         pixel_positions.sort_unstable_by(|a, b| b.0.cmp(&a.0)); // Descending order
-        let num_pixels_for_fit = (pixel_positions.len() * 30 / 100).max(10).min(50);
+        let num_pixels_for_fit = (pixel_positions.len() * 30 / 100).clamp(10, 50);
 
         let U: Vec<(usize, usize)> = pixel_positions
             .iter()
@@ -414,26 +400,15 @@ impl Guider {
 
         // (2) (ii) Initial Gaussian fit
         let (x_c, y_c, _sigma_x, _sigma_y, _A) =
-            match self.fast_gaussian_fit(&window_pixels, window_size, &U) {
-                Some(params) => params,
-                None => return None,
-            };
+            self.fast_gaussian_fit(&window_pixels, window_size, &U)?;
 
         // (3) (i)
         // Refine using only pixels with SNR > T
         let mut V: Vec<(usize, usize)> = Vec::new();
         for y in 0..window_size as usize {
             for x in 0..window_size as usize {
-                let snr = Self::SNR_i(
-                    x as f64,
-                    y as f64,
-                    &window_pixels,
-                    _A,
-                    x_c,
-                    y_c,
-                    _sigma_x,
-                    _sigma_y,
-                );
+                let v = (_A, x_c, y_c, _sigma_x, _sigma_y);
+                let snr = Self::SNR_i(x as f64, y as f64, &window_pixels, v);
                 if snr > T as f64 {
                     V.push((x, y));
                 }
@@ -466,10 +441,8 @@ impl Guider {
         };
 
         // Calculate actual window origin (must match get_window logic)
-        let window_origin_x =
-            (old_star_pos.x.round() as i32 - (window_size / 2) as i32) as f64;
-        let window_origin_y =
-            (old_star_pos.y.round() as i32 - (window_size / 2) as i32) as f64;
+        let window_origin_x = (old_star_pos.x.round() as i32 - (window_size / 2) as i32) as f64;
+        let window_origin_y = (old_star_pos.y.round() as i32 - (window_size / 2) as i32) as f64;
 
         Some(StarPosition {
             x: window_origin_x + x_c_final,
