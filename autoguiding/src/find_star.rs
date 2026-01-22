@@ -10,7 +10,6 @@ fn get_window(
     window_size: u32,
     old_star_pos: StarPosition,
 ) -> Vec<Vec<u8>> {
-    // Use rounding instead of truncation to center window on star position
     let star_window = (
         (old_star_pos.x.round() as i32 - (window_size / 2) as i32).max(0) as u32,
         (old_star_pos.y.round() as i32 - (window_size / 2) as i32).max(0) as u32,
@@ -105,7 +104,7 @@ impl Guider {
         old_star_pos: StarPosition,
     ) -> Option<StarPosition> {
         // This need to be big enough so that the star does not move out of the window between frames
-        let window_size = 40;
+        let window_size = 31;
         let window_pixels = get_window(width, height, pixels, window_size as u32, old_star_pos);
 
         let mut x_c = 0.0;
@@ -114,7 +113,7 @@ impl Guider {
 
         for y in 0..window_size {
             for x in 0..window_size {
-                let I_i = window_pixels[y][x] as f64; // Fixed: row first, then column
+                let I_i = window_pixels[y][x] as f64;
 
                 if I_i > self.threshold as f64 {
                     let intensity = I_i - self.threshold as f64;
@@ -147,7 +146,7 @@ impl Guider {
         old_star_pos: StarPosition,
     ) -> Option<StarPosition> {
         // This need to be big enough so that the star does not move out of the window between frames
-        let window_size: u32 = 40;
+        let window_size: u32 = 31;
         let window_pixels = get_window(width, height, pixels, window_size, old_star_pos);
 
         // Step 1: Find max intensity for amplitude estimate
@@ -162,7 +161,6 @@ impl Guider {
         }
 
         // Step 2: Initialize Gaussian parameters using initial guess or window center
-        // If we have previous GF result, use it as starting point (in window coordinates)
         let (x_c, y_c) = (window_size as f64 / 2.0, window_size as f64 / 2.0);
 
         // v = (A, x_c, y_c, sigma_x, sigma_y)
@@ -301,7 +299,6 @@ impl Guider {
         }
 
         // Solve the 5x5 linear system using nalgebra
-        // Matrix: A * [m, n, p, q, k]^T = b
         #[rustfmt::skip]
         let a_matrix = Matrix5::new(
             sum_Ix2_Ix2, sum_Ix2_Iy2, sum_Ix2_Ix, sum_Ix2_Iy, sum_Ix2_I,
@@ -383,7 +380,7 @@ impl Guider {
         old_star_pos: StarPosition,
         T: u32,
     ) -> Option<StarPosition> {
-        // Increased window size to handle larger displacements during multi-star tracking
+        // This need to be big enough so that the star does not move out of the window between frames
         let window_size: u32 = 31;
 
         // (1)
@@ -408,6 +405,7 @@ impl Guider {
         // (2) (i) Use top 30% of bright pixels for initial fit (more robust than just 5)
         pixel_positions.sort_unstable_by(|a, b| b.0.cmp(&a.0)); // Descending order
         let num_pixels_for_fit = (pixel_positions.len() * 30 / 100).max(10).min(50);
+
         let U: Vec<(usize, usize)> = pixel_positions
             .iter()
             .take(num_pixels_for_fit)
@@ -460,20 +458,18 @@ impl Guider {
                     }
                 }
                 None => {
-                    // Refinement failed, use initial fit
-                    (x_c, y_c)
+                    return None; // Refinement failed
                 }
             }
         } else {
-            // Not enough pixels for refinement, use initial fit
-            (x_c, y_c)
+            return None; // Not enough pixels for refinement
         };
 
         // Calculate actual window origin (must match get_window logic)
         let window_origin_x =
-            (old_star_pos.x.round() as i32 - (window_size / 2) as i32).max(0) as f64;
+            (old_star_pos.x.round() as i32 - (window_size / 2) as i32) as f64;
         let window_origin_y =
-            (old_star_pos.y.round() as i32 - (window_size / 2) as i32).max(0) as f64;
+            (old_star_pos.y.round() as i32 - (window_size / 2) as i32) as f64;
 
         Some(StarPosition {
             x: window_origin_x + x_c_final,

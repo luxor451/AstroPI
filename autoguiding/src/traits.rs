@@ -1,4 +1,3 @@
-// src/traits.rs
 pub trait MountDriver {
     fn guide_ra(&mut self, correction: f64);
     fn guide_dec(&mut self, correction: f64);

@@ -1,10 +1,10 @@
-// src/simulator.rs
 use crate::traits::{Camera, MountDriver};
 use image::GenericImageView;
 use image::Pixel;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::f64::consts::PI;
+use crate::r#const::{CAM_SCALE};
 pub struct SimMount {
     pub x: f64,
     pub y: f64,
@@ -22,7 +22,7 @@ impl SimMount {
             time_step: 0.0,
             pe_amplitude: 15.0, // Large error to visualize clearly
             pe_period: 300.0,
-            drift_per_step: 0.05, // Faster drift for visibility
+            drift_per_step: 0.05, // Fast drift for visibility
         }
     }
 
@@ -31,9 +31,9 @@ impl SimMount {
         // Periodic Error Simulation (Sine Wave only)
         let pe = (self.time_step / self.pe_period * 2.0 * PI).sin() * self.pe_amplitude;
         // Apply error to X axis (RA)
-        self.x += pe * 0.02 + self.drift_per_step;
+        self.x += pe * 0.02 + self.drift_per_step * 0.2;
         // Small drift on Y axis (DEC) for realism
-        self.y += self.drift_per_step * 0.2;
+        self.y += self.drift_per_step * 0.8;
     }
 }
 
@@ -62,7 +62,7 @@ impl SimCamera {
     pub fn new(path: &str, w: u32, h: u32) -> Self {
         let img = image::open(path).expect("Failed to open sky_map.jpg");
         // Use a fixed seed for deterministic behavior. Change seed value to get different noise patterns.
-        let rng = StdRng::seed_from_u64(42);
+        let rng = StdRng::seed_from_u64(0b01110011011001010110000101101100);
         Self {
             sky_image: img,
             fov_w: w,
@@ -75,16 +75,15 @@ impl SimCamera {
 impl Camera for SimCamera {
     fn capture_frame(&self, center_x: f64, center_y: f64) -> (u32, u32, Vec<u8>) {
         // 2x upscaling: output is 2x larger, so 0.5 mount pixel movement = 1 camera pixel
-        const SCALE: u32 = 2;
-        let out_w = self.fov_w * SCALE;
-        let out_h = self.fov_h * SCALE;
+        let out_w = self.fov_w * CAM_SCALE as u32;
+        let out_h = self.fov_h * CAM_SCALE as u32;
 
         // Calculate the top-left corner in sky image coordinates (floating point)
         let top_left_x = center_x - (self.fov_w as f64 / 2.0);
         let top_left_y = center_y - (self.fov_h as f64 / 2.0);
 
         let mut rng = self.rng.borrow_mut();
-        let brightness_factor = 1.0 + rng.random_range(-0.1..0.1); // ±5% brightness variation
+        let brightness_factor = 1.0 + rng.random_range(-0.1..0.1); // ±10% brightness variation
 
         let mut buffer = Vec::with_capacity((out_w * out_h) as usize);
 
@@ -93,8 +92,8 @@ impl Camera for SimCamera {
         for out_y in 0..out_h {
             for out_x in 0..out_w {
                 // Map output pixel back to sky image coordinates (with sub-pixel precision)
-                let sky_x = top_left_x + (out_x as f64 / SCALE as f64);
-                let sky_y = top_left_y + (out_y as f64 / SCALE as f64);
+                let sky_x = top_left_x + (out_x as f64 / CAM_SCALE as u32 as f64);
+                let sky_y = top_left_y + (out_y as f64 / CAM_SCALE as u32 as f64);
 
                 // Bilinear interpolation
                 let x0 = sky_x.floor() as i32;
@@ -126,7 +125,7 @@ impl Camera for SimCamera {
                     + p11 * fx * fy;
 
                 let varied = pixel_value * brightness_factor;
-                let noise = rng.random_range(-20.0..20.0);
+                let noise = rng.random_range(-20.0..20.0); // High noise
                 let noisy = varied + noise;
                 let final_value = noisy.clamp(0.0, 255.0) as u8;
 

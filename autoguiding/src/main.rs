@@ -1,8 +1,8 @@
+mod r#const;
 mod find_star;
 mod guider;
 mod simulator;
 mod traits;
-mod r#const;
 
 use crate::traits::{Camera, MountDriver};
 use axum::{
@@ -23,7 +23,7 @@ use tokio::sync::{broadcast, mpsc};
 use tower_http::services::ServeFile;
 
 use crate::r#const::{
-    CAM_SCALE, CAM_H, CAM_W, MAX_CORRECTION, NB_STARS, RMS_WINDOW_SIZE, START_X, START_Y, T,
+    CAM_H, CAM_SCALE, CAM_W, MAX_CORRECTION, NB_STARS, RMS_WINDOW_SIZE, START_X, START_Y, T, MAX_DEVIATION,
 };
 
 // Commands from UI to guider
@@ -118,8 +118,6 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 /// Reject outlier displacements using median filtering.
 /// Returns the filtered average displacement (RA, DEC) in mount pixels.
 fn filter_outlier_displacements(displacements: &[(f64, f64)]) -> (f64, f64) {
-    const MAX_DEVIATION: f64 = 3.0; // Max deviation from median in pixels
-
     if displacements.len() >= 2 {
         // Calculate median displacement
         let mut ra_vals: Vec<f64> = displacements.iter().map(|(ra, _)| *ra).collect();
@@ -251,7 +249,7 @@ async fn run_simulation_loop(
                     }
                 }
 
-                // Always update mount physics (drift continues even when not guiding)
+                // Always update mount physics
                 mount.update();
 
                 let (mx, my) = mount.get_position();
@@ -324,7 +322,7 @@ async fn run_simulation_loop(
                 if is_guiding {
                     log.push_str("\nGUIDING\n");
                     log.push_str(&format!("  Correction: ΔRA={:+.4}  ΔDEC={:+.4}\n", correction.0, correction.1));
-                    log.push_str(&format!("\nTimings {}μs:\n", time_multi));
+                    log.push_str(&format!("  Time taken: {}μs:\n", time_multi));
                     log.push_str(&format!("\nSTAR TRACKING ({}/{} stars)\n", tracked_stars.len(), guider.guide_stars.len()));
 
                 }

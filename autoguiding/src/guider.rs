@@ -1,10 +1,8 @@
-// src/guider.rs
-
-use crate::T;
 use crate::r#const::{
-    FILTER_CUTOFF_FREQ_DEC, FILTER_CUTOFF_FREQ_RA, INTEGRAL_LIMIT_DEC, INTEGRAL_LIMIT_RA, KI_DEC,
-    KI_RA, KD_DEC, KD_RA, KP_DEC, KP_RA,
+    FILTER_CUTOFF_FREQ_DEC, FILTER_CUTOFF_FREQ_RA, INTEGRAL_LIMIT_DEC, INTEGRAL_LIMIT_RA, KD_DEC,
+    KD_RA, KI_DEC, KI_RA, KP_DEC, KP_RA,
 };
+use crate::T;
 #[derive(Debug, Clone, Copy)]
 pub struct StarPosition {
     pub x: f64,
@@ -25,8 +23,6 @@ pub struct Guider {
     filtered_error_ra: f64,
     filtered_error_dec: f64,
 }
-
-
 
 fn derivatives(x_t: f64, x_t_minus_1: f64, dt: f64) -> f64 {
     (x_t - x_t_minus_1) / dt
@@ -147,7 +143,7 @@ impl Guider {
 
         // Use filtered errors for PID calculations
         let error_ra = self.filtered_error_ra;
-        let error_dec = self.filtered_error_dec; // Use directly like RA - filter handles noise
+        let error_dec = self.filtered_error_dec;
 
         // RA PID calculation using filtered error
         let (correction_ra, new_integral_ra) = pid(
@@ -159,9 +155,6 @@ impl Guider {
             self.integral_ra,
             dt,
         );
-        self.prev_error_ra = error_ra;
-        // Apply anti-windup: clamp integral term to prevent it from growing unbounded
-        self.integral_ra = new_integral_ra.clamp(-INTEGRAL_LIMIT_RA, INTEGRAL_LIMIT_RA);
 
         // DEC PID calculation using filtered error
         let (correction_dec, new_integral_dec) = pid(
@@ -173,11 +166,13 @@ impl Guider {
             self.integral_dec,
             dt,
         );
+
+        self.prev_error_ra = error_ra;
         self.prev_error_dec = error_dec;
         // Apply anti-windup: clamp integral term to prevent it from growing unbounded
+        self.integral_ra = new_integral_ra.clamp(-INTEGRAL_LIMIT_RA, INTEGRAL_LIMIT_RA);
         self.integral_dec = new_integral_dec.clamp(-INTEGRAL_LIMIT_DEC, INTEGRAL_LIMIT_DEC);
 
-        // Return (RA, DEC) corrections in correct order
         (correction_ra, correction_dec)
     }
 
@@ -193,6 +188,8 @@ impl Guider {
         let isolation_radius = 50.0; // Minimum distance from other bright regions
         let min_brightness = self.threshold + 100; // Star should be quite bright
         let edge_margin = 40.0; // Minimum distance from frame edges
+        let min_selected_separation = 80.0; // Minimum distance between selected stars
+
 
         // Find all bright pixel clusters (potential stars)
         let mut star_candidates: Vec<(f64, f64, f64)> = Vec::new(); // (x, y, total_brightness)
@@ -278,7 +275,7 @@ impl Guider {
         }
 
         // Find the best isolated stars (prioritizing brightness)
-        let mut scored_stars: Vec<(f64, f64, f64, f64)> = Vec::new(); // (x, y, score, brightness)
+        let mut scored_stars: Vec<(f64, f64, f64)> = Vec::new(); // (x, y, score, brightness)
 
         for (i, &(x, y, brightness)) in star_candidates.iter().enumerate() {
             // Skip stars too close to edges
@@ -306,20 +303,16 @@ impl Guider {
                 continue;
             }
 
-            // Score = brightness^2 (heavily prioritize brightness, isolation already filtered)
-            // Using squared brightness makes brighter stars much more preferred
-            let score = brightness * brightness;
-            scored_stars.push((x, y, score, brightness));
+            scored_stars.push((x, y, brightness));
         }
 
         // Sort by score (descending) - brightest stars first
         scored_stars.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
 
         // Greedy selection: ensure minimum separation between SELECTED stars
-        let min_selected_separation = 80.0; // Minimum distance between selected stars
         let mut selected_stars: Vec<(f64, f64, f64)> = Vec::new(); // (x, y, brightness)
 
-        for (x, y, _score, brightness) in &scored_stars {
+        for (x, y, brightness) in &scored_stars {
             // Check if this star is far enough from all already-selected stars
             let mut too_close = false;
             for (sx, sy, _) in &selected_stars {
@@ -346,11 +339,9 @@ impl Guider {
 
         // Refine each star position using FGF for consistency with tracking algorithm
         // This ensures initial positions match what FGF will find during tracking
-        // IMPORTANT: Use T=4 to match the tracking threshold in main.rs
         self.guide_stars = cg_positions
             .iter()
             .filter_map(|cg_pos| {
-                // Use FGF with threshold T=4 (must match tracking threshold)
                 self.find_star_FGF(width, height, pixels, *cg_pos, T)
             })
             .collect();
