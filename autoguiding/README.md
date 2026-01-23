@@ -68,6 +68,13 @@ This algorithm achieves the accuracy of Gaussian fitting with much better perfor
 Have Rust and cargo install, for this go to [rust-lang.org](https://rust-lang.org/tools/install/)
 
 ```bash
+# download the project
+git clone https://github.com/luxor451/AstroPI.git
+# Switch to right branch
+git switch computer_vision_exam
+# access the right folder
+cd autoguiding
+
 # Build and run
 cargo run --release
 
