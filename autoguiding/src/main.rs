@@ -28,6 +28,17 @@ use crate::r#const::{
     START_Y, T,
 };
 
+// Star finding algorithm selection
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+enum StarFindingAlgorithm {
+    CG,
+    GF,
+    #[allow(clippy::upper_case_acronyms)]
+    #[default]
+    FGF,
+}
+
 // Commands from UI to guider
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "command")]
@@ -36,6 +47,8 @@ enum GuiderCommand {
     Start,
     #[serde(rename = "stop")]
     Stop,
+    #[serde(rename = "set_algorithm")]
+    SetAlgorithm { algorithm: StarFindingAlgorithm },
 }
 
 // The data packet we send to the browser
@@ -69,6 +82,8 @@ struct Telemetry {
     fgf_delta: Option<String>,
     // Guider state
     is_guiding: bool,
+    // Selected algorithm
+    selected_algorithm: StarFindingAlgorithm,
 }
 
 // Shared app state
@@ -162,12 +177,18 @@ fn guide_mount(
     gray_pixels: &[u8],
     tracked_stars: &mut Vec<guider::StarPosition>,
     tracked_original_indices: &mut Vec<usize>,
+    algorithm: StarFindingAlgorithm,
 ) -> (f64, f64) {
     let search_positions = &guider.guide_stars;
 
-    // Track each guide star
+    // Track each guide star using the selected algorithm
     for (idx, star) in search_positions.iter().enumerate() {
-        if let Some(s) = guider.find_star_FGF(w, h, gray_pixels, *star, T) {
+        let found_star = match algorithm {
+            StarFindingAlgorithm::CG => guider.find_star_CG(w, h, gray_pixels, *star),
+            StarFindingAlgorithm::GF => guider.find_star_GF(w, h, gray_pixels, *star),
+            StarFindingAlgorithm::FGF => guider.find_star_FGF(w, h, gray_pixels, *star, T),
+        };
+        if let Some(s) = found_star {
             tracked_stars.push(s);
             tracked_original_indices.push(idx);
         }
@@ -222,6 +243,7 @@ async fn run_simulation_loop(
     let mut is_guiding = false;
     let mut initial_mount_pos = mount.get_position();
     let mut rms_samples: VecDeque<(f64, f64)> = VecDeque::with_capacity(RMS_WINDOW_SIZE);
+    let mut selected_algorithm = StarFindingAlgorithm::default();
 
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
 
@@ -236,7 +258,23 @@ async fn run_simulation_loop(
                             // Capture frame and select guide stars
                             let (mx, my) = mount.get_position();
                             let (w, h, gray_pixels) = camera.capture_frame(mx, my);
+
+                            // First, detect candidate stars
                             guider.select_guide_star(w, h, &gray_pixels, NB_STARS);
+
+                            // Then refine positions using the selected algorithm
+                            let refined_stars: Vec<guider::StarPosition> = guider.guide_stars
+                                .iter()
+                                .filter_map(|star| {
+                                    match selected_algorithm {
+                                        StarFindingAlgorithm::CG => guider.find_star_CG(w, h, &gray_pixels, *star),
+                                        StarFindingAlgorithm::GF => guider.find_star_GF(w, h, &gray_pixels, *star),
+                                        StarFindingAlgorithm::FGF => guider.find_star_FGF(w, h, &gray_pixels, *star, T),
+                                    }
+                                })
+                                .collect();
+
+                            guider.guide_stars = refined_stars;
                             initial_mount_pos = mount.get_position();
                             rms_samples.clear();
                             is_guiding = true;
@@ -247,6 +285,38 @@ async fn run_simulation_loop(
                             is_guiding = false;
                             guider.guide_stars.clear();
                             rms_samples.clear();
+                        }
+                        GuiderCommand::SetAlgorithm { algorithm } => {
+                            println!("🔧 Algorithm changed to {:?}", algorithm);
+                            selected_algorithm = algorithm;
+
+                            // If guiding is active, re-select guide stars with the new algorithm
+                            // to avoid offset issues from algorithm differences
+                            if is_guiding {
+                                println!("🔄 Re-selecting guide stars with new algorithm...");
+                                let (mx, my) = mount.get_position();
+                                let (w, h, gray_pixels) = camera.capture_frame(mx, my);
+
+                                // First, detect candidate stars
+                                guider.select_guide_star(w, h, &gray_pixels, NB_STARS);
+
+                                // Then refine positions using the selected algorithm
+                                let refined_stars: Vec<guider::StarPosition> = guider.guide_stars
+                                    .iter()
+                                    .filter_map(|star| {
+                                        match algorithm {
+                                            StarFindingAlgorithm::CG => guider.find_star_CG(w, h, &gray_pixels, *star),
+                                            StarFindingAlgorithm::GF => guider.find_star_GF(w, h, &gray_pixels, *star),
+                                            StarFindingAlgorithm::FGF => guider.find_star_FGF(w, h, &gray_pixels, *star, T),
+                                        }
+                                    })
+                                    .collect();
+
+                                guider.guide_stars = refined_stars;
+                                initial_mount_pos = mount.get_position();
+                                rms_samples.clear();
+                                println!("✓ Guide stars re-selected: {} stars", guider.guide_stars.len());
+                            }
                         }
                     }
                 }
@@ -270,6 +340,7 @@ async fn run_simulation_loop(
                         &gray_pixels,
                         &mut tracked_stars,
                         &mut tracked_original_indices,
+                        selected_algorithm,
                     );
 
                     // Apply corrections to mount (with outlier rejection)
@@ -397,6 +468,7 @@ async fn run_simulation_loop(
                     gf_delta,
                     fgf_delta,
                     is_guiding,
+                    selected_algorithm,
                 });
             }
         }

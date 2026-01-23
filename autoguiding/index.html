@@ -257,6 +257,24 @@
             background: #424242;
             color: #888;
         ">IDLE</span>
+        
+        <!-- Algorithm Selector -->
+        <span style="margin-left: 30px; color: #888;">Algorithm:</span>
+        <select id="algorithm-select" onchange="setAlgorithm(this.value)" style="
+            margin-left: 8px;
+            padding: 8px 16px;
+            font-size: 14px;
+            font-weight: bold;
+            background: #1e1e1e;
+            color: #00ff00;
+            border: 2px solid #00ff00;
+            border-radius: 4px;
+            cursor: pointer;
+        ">
+            <option value="fgf" selected>FGF (Fast Gaussian)</option>
+            <option value="gf">GF (Gaussian Fit)</option>
+            <option value="cg">CG (Center of Gravity)</option>
+        </select>
     </div>
     
     <div class="dashboard">
@@ -403,10 +421,17 @@
         const btnStart = document.getElementById("btn-start");
         const btnStop = document.getElementById("btn-stop");
         const statusIndicator = document.getElementById("status-indicator");
+        const algorithmSelect = document.getElementById("algorithm-select");
         
         function sendCommand(cmd) {
             if (ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ command: cmd }));
+            }
+        }
+        
+        function setAlgorithm(algorithm) {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ command: "set_algorithm", algorithm: algorithm }));
             }
         }
         
@@ -427,6 +452,31 @@
                 statusIndicator.textContent = "IDLE";
                 statusIndicator.style.background = "#424242";
                 statusIndicator.style.color = "#888";
+            }
+        }
+        
+        // Algorithm panel elements
+        const cgPanel = document.querySelector('.algorithm-panel:nth-child(1) h3');
+        const gfPanel = document.querySelector('.algorithm-panel:nth-child(2) h3');
+        const fgfPanel = document.querySelector('.algorithm-panel:nth-child(3) h3');
+        
+        function updateAlgorithmPanelHighlights(algorithm) {
+            // Reset all panels
+            cgPanel.textContent = 'CG (Center of Gravity)';
+            gfPanel.textContent = 'GF (Gaussian Fit)';
+            fgfPanel.textContent = 'FGF (Fast Gaussian)';
+            
+            // Highlight the active one
+            switch(algorithm) {
+                case 'cg':
+                    cgPanel.textContent = 'CG (Center of Gravity) ✓';
+                    break;
+                case 'gf':
+                    gfPanel.textContent = 'GF (Gaussian Fit) ✓';
+                    break;
+                case 'fgf':
+                    fgfPanel.textContent = 'FGF (Fast Gaussian) ✓';
+                    break;
             }
         }
         
@@ -519,6 +569,12 @@
             
             // Update guiding state from server
             updateGuidingState(data.is_guiding);
+            
+            // Update algorithm selector to match server state
+            if (data.selected_algorithm) {
+                algorithmSelect.value = data.selected_algorithm;
+                updateAlgorithmPanelHighlights(data.selected_algorithm);
+            }
 
             // A. Update Camera Image
             img.src = "data:image/jpeg;base64," + data.image_base64;
