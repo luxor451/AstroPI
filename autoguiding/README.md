@@ -80,12 +80,10 @@ This transforms into a linear least-squares problem $\mathbf{A}\mathbf{x} = \mat
 Have Rust and Cargo installed. Visit [rust-lang.org](https://rust-lang.org/tools/install/) for installation instructions.
 
 ```bash
-# download the project
-git clone https://github.com/luxor451/AstroPI.git
-
+# download the project (only the latest commit and the right branch)
+git clone https://github.com/luxor451/AstroPI.git --depth=1 --branch computer_vision_exam --single-branch
 # Switch to right branch
 cd AstroPI
-git switch computer_vision_exam
 
 # access the right folder
 cd autoguiding
