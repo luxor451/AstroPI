@@ -7,13 +7,6 @@ The presentation slides are under `presentation/build/DOCHE_Dimitry_Computer_Vis
 
 This project implements a real-time autoguiding system that tracks stars and corrects telescope mount drift. It features:
 
-- **Multi-star tracking** for improved accuracy
-- **Web-based UI** for monitoring and control
-- **Three star centroiding algorithms** with live selection
-- **Real-time algorithm switching** with automatic star re-calibration
-- **Closed-loop PID control** with low-pass filtering for smooth corrections
-- **Simulated mount** with periodic error and drift for testing
-
 ## Project Structure
 
 ```
@@ -82,17 +75,15 @@ Have Rust and Cargo installed. Visit [rust-lang.org](https://rust-lang.org/tools
 ```bash
 # download the project (only the latest commit and the right branch)
 git clone https://github.com/luxor451/AstroPI.git --depth=1 --branch computer_vision_exam --single-branch
-# Switch to right branch
-cd AstroPI
 
-# access the right folder
-cd autoguiding
+# Access the right folder
+cd AstroPI/autoguiding
 
 # Build and run
 cargo run --release
 
-# Open browser to
-http://127.0.0.1:3000
+# Open browser to http://127.0.0.1:3000. For exemple :
+firefox http://127.0.0.1:3000
 ```
 
 
@@ -119,7 +110,7 @@ Key parameters you can tune:
 - `MAX_CORRECTION` - Maximum correction per frame
 - `MAX_DEVIATION` - Outlier rejection threshold
 
-## Dependencies
+## Dependencies (should be installed by cargo)
 
 - `axum` - Web server framework
 - `tokio` - Async runtime
