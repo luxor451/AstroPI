@@ -174,11 +174,8 @@ impl IndiClient {
             };
             
             device_map.insert(name, property);
-        } else if tag_name == "message" {
-             if let Some(msg) = root.attribute("message") {
-                 let device = root.attribute("device").unwrap_or("System");
-                 println!("INDI Message [{}]: {}", device, msg);
-             }
+        } else {
+            // For now, ignore other message types (e.g., <defTextVector>, <message>, etc.)
         }
         Ok(())
     }
@@ -250,17 +247,10 @@ impl IndiClient {
     /// # });
     /// ```
     pub async fn set_location(&self, latitude: f64, longitude: f64, elevation: f64) -> Result<()> {
-        if !(-90.0..=90.0).contains(&latitude) {
-            return Err(IndiError::Device(format!(
-                "Invalid latitude: {}. Must be -90.0 to +90.0", latitude)));
-        }
-        if !(-180.0..=180.0).contains(&longitude) {
-            return Err(IndiError::Device(format!(
-                "Invalid longitude: {}. Must be -180.0 to +180.0", longitude)));
-        }
+        assert!(elevation >= -500.0 && elevation <= 9000.0, "Elevation must be between -500 and 9000 meters");
+        assert!(latitude >= -90.0 && latitude <= 90.0, "Latitude must be between -90 and +90 degrees");
+        assert!(longitude >= -180.0 && longitude <= 180.0, "Longitude must be between -180 and +180 degrees");
 
-        println!("Setting location: Lat={:.4}°, Lon={:.4}°, Elev={:.1}m", latitude, longitude, elevation);
-        
         self.send_numbers("GEOGRAPHIC_COORD", &[
             ("LAT", latitude),
             ("LONG", longitude),
@@ -271,9 +261,7 @@ impl IndiClient {
     }
 
     /// Set UTC time and date for the mount
-    pub async fn set_time(&self, utc_datetime: &str) -> Result<()> {
-        println!("Setting UTC time: {}", utc_datetime);
-        
+    pub async fn set_time(&self, utc_datetime: &str) -> Result<()> {      
         self.send_command(&format!(
             "<newTextVector device=\"{}\" name=\"TIME_UTC\">\n  <oneText name=\"UTC\">{}</oneText>\n  <oneText name=\"OFFSET\">0.0</oneText>\n</newTextVector>\n",
             self.device_name, utc_datetime
@@ -284,100 +272,34 @@ impl IndiClient {
 
     /// Send a goto command to the telescope mount
     pub async fn goto(&mut self, ra: f64, dec: f64) -> Result<()> {
-        self.validate_coordinates(ra, dec)?;
-        
-        // Get current position
-        let current_pos = self.get_current_position().await?;
-        self.print_goto_info(current_pos, (ra, dec));
+        assert!(ra >= 0.0 && ra <= 24.0, "RA must be between 0 and 24 hours");
+        assert!(dec >= -90.0 && dec <= 90.0, "DEC must be between -90 and +90 degrees");
 
-        // Setup mount for goto
-        // For EQMod and many INDI drivers:
-        // 1. Ensure we are tracking (TELESCOPE_TRACK_STATE = TRACK_ON)
-        // 2. Set ON_COORD_SET to SLEW (or TRACK, but SLEW often forces the move more reliably)
-        // 3. Send coordinates
-        
-        println!("DEBUG: Ensuring Tracking is ON");
+
         self.send_switch("TELESCOPE_TRACK_STATE", &[("TRACK_ON", true), ("TRACK_OFF", false)]).await?;
-        sleep(Duration::from_millis(500)).await;
-
-        println!("DEBUG: Setting ON_COORD_SET=TRACK for GOTO");
-        // Try explicitly clearing others?
-        // Some drivers are picky. Let's try sending just the one we want true.
-        // Although send_switch logic sends all provided pairs.
         self.send_switch("ON_COORD_SET", &[
             ("TRACK", true), 
             ("SLEW", false), 
             ("SYNC", false)
         ]).await?;
-        sleep(Duration::from_millis(500)).await;
-        
-        // Send coordinates
-        println!("DEBUG: Sending Target Coordinates (GOTO trigger)");
         self.send_numbers("EQUATORIAL_EOD_COORD", &[("RA", ra), ("DEC", dec)]).await?;
-
-        println!("\nGOTO command sent, monitoring slew progress...\n");
-        
         // Monitor slew
         self.monitor_slew(ra, dec).await?;
         
         Ok(())
     }
 
-    /// Get current mount position
-    pub async fn get_current_position(&self) -> Result<(f64, f64)> {
-        let state = self.state.read().await;
-        
-        if let Some(props) = state.devices.get(&self.device_name) {
-            if let Some(coord) = props.get("EQUATORIAL_EOD_COORD") {
-                let ra = coord.elements.get("RA").and_then(|v| v.parse().ok()).unwrap_or(0.0);
-                let dec = coord.elements.get("DEC").and_then(|v| v.parse().ok()).unwrap_or(0.0);
-                return Ok((ra, dec));
-            }
-        }
-        
-        // If not found, check if we have any data at all
-        if state.devices.is_empty() {
-             println!("Warning: No device data received yet.");
-        }
-        
-        Ok((0.0, 0.0))
-    }
-
-    /// Get Local Sidereal Time from the mount
-    pub async fn get_lst(&self) -> Result<f64> {
-        // Wait reasonably for data if it's missing (simple polling)
-        for _ in 0..5 {
-            let state = self.state.read().await;
-            if let Some(props) = state.devices.get(&self.device_name) {
-                if let Some(time_lst) = props.get("TIME_LST") {
-                    if let Some(lst_str) = time_lst.elements.get("LST") {
-                        if let Ok(val) = lst_str.parse::<f64>() {
-                            return Ok(val);
-                        }
-                    }
-                }
-            }
-            drop(state);
-            sleep(Duration::from_millis(500)).await;
-        }
-
-        Err(IndiError::Device("Could not find TIME_LST property or LST value in cached state".to_string()))
-    }
-
-
     /// Monitor the slew progress
     async fn monitor_slew(&mut self, target_ra: f64, target_dec: f64) -> Result<()> {
         let start = Instant::now();
         let mut last_pos: (f64, f64) = (0.0, 0.0);
         
-        for _ in 0..60 { // Extended timeout for slew
-            sleep(Duration::from_millis(500)).await;
+        for _ in 0..60 {
+            sleep(Duration::from_millis(1000)).await;
             
             let state = self.state.read().await;
             
-            // Check for connection/device errors if we implemented error capturing
-            // For now, check position
-            
+
             let (ra, dec) = if let Some(props) = state.devices.get(&self.device_name) {
                 if let Some(coord) = props.get("EQUATORIAL_EOD_COORD") {
                     let r: f64 = coord.elements.get("RA").and_then(|v| v.parse().ok()).unwrap_or(last_pos.0);
@@ -386,16 +308,14 @@ impl IndiClient {
                 } else { last_pos }
             } else { last_pos };
 
-            // Determine status
-            // Check ON_COORD_SET for "Busy" vs "Ok" state
-            // Or TELESCOPE_TRACK_STATE
+
             let mut status = "UNKNOWN";
             if let Some(props) = state.devices.get(&self.device_name) {
                  if let Some(coord_prop) = props.get("EQUATORIAL_EOD_COORD") {
                      if coord_prop.state == "Busy" {
-                         status = "🔄 SLEWING";
+                         status = " SLEWING";
                      } else if coord_prop.state == "Ok" {
-                         status = "✅ TRACKING"; // Likely
+                         status = " TRACKING"; // Likely
                      }
                  }
             }
@@ -404,7 +324,7 @@ impl IndiClient {
             let delta_ra = (ra - last_pos.0).abs();
             let delta_dec = (dec - last_pos.1).abs();
 
-            println!("[{:2}s] {} - RA: {:.6}h, DEC: {:.6}° (ΔRA:{:.4}h, ΔDEC:{:.4}°)",
+            println!("[{:2}s] {} Poiting to : - RA: {:.6}h, DEC: {:.6}° (ΔRA:{:.4}h, ΔDEC:{:.4}°)",
                 elapsed, status, ra, dec, delta_ra, delta_dec);
 
             last_pos = (ra, dec);
@@ -417,7 +337,7 @@ impl IndiClient {
                 } else { false };
                 
                 if !is_busy {
-                    println!("\n✅ Mount reached target position!");
+                    println!("\n Mount reached target position!");
                     break;
                 }
             }
@@ -450,41 +370,12 @@ impl IndiClient {
     }
 
     /// Send raw command
-    pub async fn send_command(&self, cmd: &str) -> Result<()> {
+    async fn send_command(&self, cmd: &str) -> Result<()> {
         let mut writer = self.writer.lock().await;
         writer.write_all(cmd.as_bytes()).await
             .map_err(|e| IndiError::Communication(format!("Failed to send command: {}", e)))?;
         writer.flush().await
             .map_err(|e| IndiError::Communication(format!("Failed to flush command: {}", e)))?;
         Ok(())
-    }
-
-    /// Validate coordinates
-    fn validate_coordinates(&self, ra: f64, dec: f64) -> Result<()> {
-        if !(0.0..=24.0).contains(&ra) {
-            return Err(IndiError::Device(format!(
-                "Invalid RA: {}. Must be 0.0-24.0 hours", ra)));
-        }
-        if !(-90.0..=90.0).contains(&dec) {
-            return Err(IndiError::Device(format!(
-                "Invalid DEC: {}. Must be -90.0 to +90.0 degrees", dec)));
-        }
-        Ok(())
-    }
-
-    /// Print goto information
-    fn print_goto_info(&self, current: (f64, f64), target: (f64, f64)) {
-        println!("📡 Mount Status:");
-        println!("   Current: RA {:.4}h, DEC {:.4}°", current.0, current.1);
-        println!("   Target:  RA {:.4}h, DEC {:.4}°", target.0, target.1);
-        
-        let delta_ra = (target.0 - current.0).abs();
-        let delta_dec = (target.1 - current.1).abs();
-        println!("   Movement: RA {:.4}h ({:.1} arcmin), DEC {:.4}° ({:.1} arcmin)",
-            delta_ra, delta_ra * 60.0, delta_dec, delta_dec * 60.0);
-    }
-
-    pub fn device_name(&self) -> &str {
-        &self.device_name
     }
 }
