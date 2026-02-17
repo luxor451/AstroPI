@@ -1,7 +1,12 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::{sleep, timeout, Duration, Instant};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::{Mutex, RwLock};
+use tokio::time::{sleep, Duration, Instant};
 use thiserror::Error;
+use roxmltree::Document;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Error, Debug)]
 pub enum IndiError {
@@ -17,9 +22,26 @@ pub enum IndiError {
 
 pub type Result<T> = std::result::Result<T, IndiError>;
 
+#[derive(Debug, Clone)]
+pub struct IndiProperty {
+    pub name: String,
+    pub device: String,
+    pub state: String, // "Idle", "Ok", "Busy", "Alert"
+    pub timestamp: String,
+    // Stores element_name -> value (e.g., "CONNECT" -> "On", "RA" -> "12:00:00")
+    pub elements: HashMap<String, String>,
+}
+
+#[derive(Debug, Default)]
+pub struct IndiState {
+    // device_name -> property_name -> Property Data
+    pub devices: HashMap<String, HashMap<String, IndiProperty>>,
+}
+
 /// INDI client for communicating with telescope mounts
 pub struct IndiClient {
-    stream: TcpStream,
+    writer: Arc<Mutex<OwnedWriteHalf>>,
+    state: Arc<RwLock<IndiState>>,
     device_name: String,
 }
 
@@ -36,14 +58,129 @@ impl IndiClient {
             .await
             .map_err(|e| IndiError::Connection(format!("Failed to connect to {}: {}", addr, e)))?;
 
-        let mut client = IndiClient {
-            stream,
+        let (reader, writer) = stream.into_split();
+        let state = Arc::new(RwLock::new(IndiState::default()));
+        
+        // Spawn the continuous reader loop
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            Self::reader_loop(reader, state_clone).await;
+        });
+
+        let client = IndiClient {
+            writer: Arc::new(Mutex::new(writer)),
+            state,
             device_name: device_name.to_string(),
         };
 
+        // Send initial getProperties
+        println!("Sending initial getProperties...");
         client.send_command("<getProperties version=\"1.7\" />").await?;
         
         Ok(client)
+    }
+
+    async fn reader_loop(mut reader: OwnedReadHalf, state: Arc<RwLock<IndiState>>) {
+        let mut buffer = Vec::new();
+        let mut temp_buf = [0u8; 4096];
+
+        loop {
+            match reader.read(&mut temp_buf).await {
+                Ok(0) => {
+                    eprintln!("INDI Server closed connection.");
+                    break;
+                }
+                Ok(n) => {
+                    buffer.extend_from_slice(&temp_buf[..n]);
+                    
+                    while let Some((msg, bytes_consumed)) = Self::extract_one_xml_message(&buffer) {
+                        if let Err(_e) = Self::process_indi_message(&msg, &state).await {
+                            // eprintln!("Error parsing INDI message: {}", e);
+                        }
+                        buffer.drain(0..bytes_consumed);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error reading from INDI socket: {}", e);
+                    break;
+                }
+            }
+        }
+    }
+
+    fn extract_one_xml_message(buffer: &[u8]) -> Option<(String, usize)> {
+        let s = match std::str::from_utf8(buffer) {
+            Ok(v) => v,
+            Err(_) => return None,
+        };
+
+        let start_idx = s.find('<')?;
+        let suffix = &s[start_idx..];
+        
+        if let Some(end_tag_close) = suffix.find('>') {
+            let tag_content_end = start_idx + end_tag_close + 1;
+            
+            // Check for self-closing tag like <getProperties />
+            if s[start_idx..tag_content_end].ends_with("/>") {
+                 return Some((s[start_idx..tag_content_end].to_string(), tag_content_end));
+            }
+
+            // It has a body. We need to find the closing tag name.
+            let tag_body = &s[start_idx + 1 .. tag_content_end - 1];
+            // Get just the tag name (e.g. "defTextVector")
+            let tag_name = tag_body.split_whitespace().next().unwrap_or(tag_body);
+            
+            let close_token = format!("</{}>", tag_name);
+            if let Some(close_idx) = suffix.find(&close_token) {
+                 let total_len = start_idx + close_idx + close_token.len();
+                 return Some((s[start_idx..total_len].to_string(), total_len));
+            }
+        }
+        None
+    }
+
+    async fn process_indi_message(xml_str: &str, state: &Arc<RwLock<IndiState>>) -> std::result::Result<(), String> {
+        let doc = Document::parse(xml_str).map_err(|e| e.to_string())?;
+        let root = doc.root_element();
+        let tag_name = root.tag_name().name();
+
+        if tag_name.ends_with("Vector") {
+            let device = root.attribute("device").unwrap_or("unknown").to_string();
+            let name = root.attribute("name").unwrap_or("unknown").to_string();
+            let prop_state = root.attribute("state").unwrap_or("Idle").to_string();
+            let timestamp = root.attribute("timestamp").unwrap_or("").to_string();
+
+            let mut elements = HashMap::new();
+            for child in root.children() {
+                if child.is_element() {
+                     let elem_name = child.attribute("name").unwrap_or("").to_string();
+                     if let Some(text) = child.text() {
+                        elements.insert(elem_name, text.trim().to_string());
+                     }
+                }
+            }
+            
+            // Critical: Only update if we have meaningful data or status change
+            // Just overwrite for now
+            let mut state_lock = state.write().await;
+            let device_map = state_lock.devices.entry(device.clone()).or_default();
+            
+            let property = IndiProperty {
+                name: name.clone(),
+                device,
+                state: prop_state,
+                timestamp,
+                elements,
+            };
+            
+            device_map.insert(name, property);
+        } else if tag_name == "message" {
+             if let Some(msg) = root.attribute("message") {
+                 let device = root.attribute("device").unwrap_or("System");
+                 println!("INDI Message [{}]: {}", device, msg);
+             }
+        }
+        Ok(())
     }
 
     /// Connect to the telescope mount
@@ -51,25 +188,55 @@ impl IndiClient {
     /// This must be called before sending any commands to the mount
     /// Waits for the mount to fully initialize and report its properties
     pub async fn connect(&mut self) -> Result<()> {
+        println!("Sending CONNECTION command...");
         self.send_switch("CONNECTION", &[("CONNECT", true), ("DISCONNECT", false)]).await?;
-        self.send_switch("TELESCOPE_TRACK_STATE", &[("TRACK_ON", true), ("TRACK_OFF", false)]).await?;
         
-        sleep(Duration::from_secs(3)).await;
-        self.read_response(65536).await?; // Drain buffer
+        // Wait for connection to complete
+        println!("Waiting for mount to report connected...");
+        for i in 0..10 {
+            sleep(Duration::from_secs(1)).await;
+            
+            // Check state
+            let can_track = {
+                let state = self.state.read().await;
+                if let Some(dev_props) = state.devices.get(&self.device_name) {
+                    if let Some(conn) = dev_props.get("CONNECTION") {
+                         if let Some(val) = conn.elements.get("CONNECT") {
+                             if val == "On" {
+                                 true
+                             } else { false }
+                         } else { false }
+                    } else { false }
+                } else { false }
+            };
+
+            if can_track {
+                println!("Mount connected!");
+                 // Now enable tracking
+                self.send_switch("TELESCOPE_TRACK_STATE", &[("TRACK_ON", true), ("TRACK_OFF", false)]).await?;
+                return Ok(());
+            } else {
+                println!("Waiting... ({}/10)", i+1);
+            }
+        }
         
-        Ok(())
+        Err(IndiError::Connection(
+            "Timeout waiting for mount to connect.".to_string()
+        ))
     }
 
     /// Disconnect from the telescope mount
     pub async fn disconnect(&mut self) -> Result<()> {
         self.send_switch("CONNECTION", &[("CONNECT", false), ("DISCONNECT", true)]).await
     }
+    
 
-    /// Send a goto command to the telescope mount
+    /// Set geographic location for the mount
     ///
     /// # Arguments
-    /// * `ra` - Right Ascension in hours (0.0 to 24.0)
-    /// * `dec` - Declination in degrees (-90.0 to +90.0)
+    /// * `latitude` - Latitude in degrees (-90 to +90, positive is North)
+    /// * `longitude` - Longitude in degrees (-180 to +180, positive is East)
+    /// * `elevation` - Elevation in meters above sea level (optional, defaults to 0)
     ///
     /// # Example
     /// ```no_run
@@ -78,9 +245,44 @@ impl IndiClient {
     ///
     /// let mut client = IndiClient::new("localhost", 7624, "EQMod Mount").await.unwrap();
     /// client.connect().await.unwrap();
-    /// client.goto(12.5, 45.0).await.unwrap();
+    /// // Set location to Paris, France
+    /// client.set_location(48.8566, 2.3522, 35.0).await.unwrap();
     /// # });
     /// ```
+    pub async fn set_location(&self, latitude: f64, longitude: f64, elevation: f64) -> Result<()> {
+        if !(-90.0..=90.0).contains(&latitude) {
+            return Err(IndiError::Device(format!(
+                "Invalid latitude: {}. Must be -90.0 to +90.0", latitude)));
+        }
+        if !(-180.0..=180.0).contains(&longitude) {
+            return Err(IndiError::Device(format!(
+                "Invalid longitude: {}. Must be -180.0 to +180.0", longitude)));
+        }
+
+        println!("Setting location: Lat={:.4}°, Lon={:.4}°, Elev={:.1}m", latitude, longitude, elevation);
+        
+        self.send_numbers("GEOGRAPHIC_COORD", &[
+            ("LAT", latitude),
+            ("LONG", longitude),
+            ("ELEV", elevation)
+        ]).await?;
+        
+        Ok(())
+    }
+
+    /// Set UTC time and date for the mount
+    pub async fn set_time(&self, utc_datetime: &str) -> Result<()> {
+        println!("Setting UTC time: {}", utc_datetime);
+        
+        self.send_command(&format!(
+            "<newTextVector device=\"{}\" name=\"TIME_UTC\">\n  <oneText name=\"UTC\">{}</oneText>\n  <oneText name=\"OFFSET\">0.0</oneText>\n</newTextVector>\n",
+            self.device_name, utc_datetime
+        )).await?;
+        
+        Ok(())
+    }
+
+    /// Send a goto command to the telescope mount
     pub async fn goto(&mut self, ra: f64, dec: f64) -> Result<()> {
         self.validate_coordinates(ra, dec)?;
         
@@ -89,92 +291,116 @@ impl IndiClient {
         self.print_goto_info(current_pos, (ra, dec));
 
         // Setup mount for goto
-        self.send_switch("ON_COORD_SET", &[("TRACK", true), ("SLEW", false), ("SYNC", false)]).await?;
-        sleep(Duration::from_millis(200)).await;
+        // For EQMod and many INDI drivers:
+        // 1. Ensure we are tracking (TELESCOPE_TRACK_STATE = TRACK_ON)
+        // 2. Set ON_COORD_SET to SLEW (or TRACK, but SLEW often forces the move more reliably)
+        // 3. Send coordinates
         
+        println!("DEBUG: Ensuring Tracking is ON");
         self.send_switch("TELESCOPE_TRACK_STATE", &[("TRACK_ON", true), ("TRACK_OFF", false)]).await?;
-        sleep(Duration::from_millis(200)).await;
-        
-        self.send_switch("TELESCOPE_TRACK_MODE", &[
-            ("TRACK_SIDEREAL", true),
-            ("TRACK_SOLAR", false),
-            ("TRACK_LUNAR", false),
-            ("TRACK_CUSTOM", false)
-        ]).await?;
-        sleep(Duration::from_millis(200)).await;
+        sleep(Duration::from_millis(500)).await;
 
+        println!("DEBUG: Setting ON_COORD_SET=TRACK for GOTO");
+        // Try explicitly clearing others?
+        // Some drivers are picky. Let's try sending just the one we want true.
+        // Although send_switch logic sends all provided pairs.
+        self.send_switch("ON_COORD_SET", &[
+            ("TRACK", true), 
+            ("SLEW", false), 
+            ("SYNC", false)
+        ]).await?;
+        sleep(Duration::from_millis(500)).await;
+        
         // Send coordinates
+        println!("DEBUG: Sending Target Coordinates (GOTO trigger)");
         self.send_numbers("EQUATORIAL_EOD_COORD", &[("RA", ra), ("DEC", dec)]).await?;
 
-        println!("\n🚀 GOTO command sent, monitoring slew progress...\n");
+        println!("\nGOTO command sent, monitoring slew progress...\n");
         
         // Monitor slew
         self.monitor_slew(ra, dec).await?;
         
-        // Ensure tracking after slew
-        self.send_switch("TELESCOPE_TRACK_STATE", &[("TRACK_ON", true), ("TRACK_OFF", false)]).await?;
-        sleep(Duration::from_millis(500)).await;
-        
-        // Request properties to get updated tracking state
-        self.send_command("<getProperties version=\"1.7\" />").await?;
-        sleep(Duration::from_millis(500)).await;
-        
-        // Final status
-        if let Ok(response) = self.read_response(65536).await {
-            self.display_final_status(&response);
-        }
-
         Ok(())
     }
 
     /// Get current mount position
-    async fn get_current_position(&mut self) -> Result<(f64, f64)> {
-        self.send_command("<getProperties version=\"1.7\" />").await?;
-        sleep(Duration::from_millis(500)).await;
+    pub async fn get_current_position(&self) -> Result<(f64, f64)> {
+        let state = self.state.read().await;
         
-        let response = self.read_response(65536).await?;
-        let (ra, dec) = self.parse_coordinates(&response);
-        Ok((ra, dec))
+        if let Some(props) = state.devices.get(&self.device_name) {
+            if let Some(coord) = props.get("EQUATORIAL_EOD_COORD") {
+                let ra = coord.elements.get("RA").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                let dec = coord.elements.get("DEC").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                return Ok((ra, dec));
+            }
+        }
+        
+        // If not found, check if we have any data at all
+        if state.devices.is_empty() {
+             println!("Warning: No device data received yet.");
+        }
+        
+        Ok((0.0, 0.0))
     }
+
+    /// Get Local Sidereal Time from the mount
+    pub async fn get_lst(&self) -> Result<f64> {
+        // Wait reasonably for data if it's missing (simple polling)
+        for _ in 0..5 {
+            let state = self.state.read().await;
+            if let Some(props) = state.devices.get(&self.device_name) {
+                if let Some(time_lst) = props.get("TIME_LST") {
+                    if let Some(lst_str) = time_lst.elements.get("LST") {
+                        if let Ok(val) = lst_str.parse::<f64>() {
+                            return Ok(val);
+                        }
+                    }
+                }
+            }
+            drop(state);
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        Err(IndiError::Device("Could not find TIME_LST property or LST value in cached state".to_string()))
+    }
+
 
     /// Monitor the slew progress
     async fn monitor_slew(&mut self, target_ra: f64, target_dec: f64) -> Result<()> {
         let start = Instant::now();
-        let mut last_pos = (0.0, 0.0);
+        let mut last_pos: (f64, f64) = (0.0, 0.0);
         
-        for i in 0..30 {
-            sleep(Duration::from_secs(1)).await;
+        for _ in 0..60 { // Extended timeout for slew
+            sleep(Duration::from_millis(500)).await;
             
-            let response = self.read_response(65536).await?;
-            if response.is_empty() {
-                continue;
-            }
+            let state = self.state.read().await;
+            
+            // Check for connection/device errors if we implemented error capturing
+            // For now, check position
+            
+            let (ra, dec) = if let Some(props) = state.devices.get(&self.device_name) {
+                if let Some(coord) = props.get("EQUATORIAL_EOD_COORD") {
+                    let r: f64 = coord.elements.get("RA").and_then(|v| v.parse().ok()).unwrap_or(last_pos.0);
+                    let d: f64 = coord.elements.get("DEC").and_then(|v| v.parse().ok()).unwrap_or(last_pos.1);
+                    (r, d)
+                } else { last_pos }
+            } else { last_pos };
 
-            // Check for errors
-            if let Some(error) = self.extract_error(&response) {
-                println!("\n⚠️  {}", error);
+            // Determine status
+            // Check ON_COORD_SET for "Busy" vs "Ok" state
+            // Or TELESCOPE_TRACK_STATE
+            let mut status = "UNKNOWN";
+            if let Some(props) = state.devices.get(&self.device_name) {
+                 if let Some(coord_prop) = props.get("EQUATORIAL_EOD_COORD") {
+                     if coord_prop.state == "Busy" {
+                         status = "🔄 SLEWING";
+                     } else if coord_prop.state == "Ok" {
+                         status = "✅ TRACKING"; // Likely
+                     }
+                 }
             }
-
-            // Check completion
-            if response.contains("Telescope slew is complete") {
-                println!("\n✅ Mount reports: Telescope slew is complete!");
-                break;
-            }
-
-            // Get current position and status
-            let (ra, dec) = self.parse_coordinates(&response);
-            let is_busy = response.contains("state=\"Busy\"");
-            let tracking = self.parse_tracking_state(&response);
 
             let elapsed = start.elapsed().as_secs();
-            let status = if is_busy {
-                "🔄 SLEWING"
-            } else if tracking {
-                "✅ TRACKING"
-            } else {
-                "⏸️  IDLE"
-            };
-
             let delta_ra = (ra - last_pos.0).abs();
             let delta_dec = (dec - last_pos.1).abs();
 
@@ -184,9 +410,16 @@ impl IndiClient {
             last_pos = (ra, dec);
 
             // Check if near target
-            if (ra - target_ra).abs() < 0.01 && (dec - target_dec).abs() < 0.1 && i > 5 {
-                println!("\n✅ Mount reached target position!");
-                break;
+            if (ra - target_ra).abs() < 0.01 && (dec - target_dec).abs() < 0.1 {
+                // Also check if state is no longer Busy
+                let is_busy = if let Some(props) = state.devices.get(&self.device_name) {
+                     props.get("EQUATORIAL_EOD_COORD").map(|p| p.state == "Busy").unwrap_or(false)
+                } else { false };
+                
+                if !is_busy {
+                    println!("\n✅ Mount reached target position!");
+                    break;
+                }
             }
         }
 
@@ -194,7 +427,7 @@ impl IndiClient {
     }
 
     /// Send a switch vector command
-    async fn send_switch(&mut self, name: &str, switches: &[(&str, bool)]) -> Result<()> {
+    async fn send_switch(&self, name: &str, switches: &[(&str, bool)]) -> Result<()> {
         let mut xml = format!("<newSwitchVector device=\"{}\" name=\"{}\">\n", self.device_name, name);
         for (switch_name, on) in switches {
             xml.push_str(&format!("  <oneSwitch name=\"{}\">{}</oneSwitch>\n",
@@ -206,7 +439,7 @@ impl IndiClient {
     }
 
     /// Send a number vector command
-    async fn send_numbers(&mut self, name: &str, numbers: &[(&str, f64)]) -> Result<()> {
+    async fn send_numbers(&self, name: &str, numbers: &[(&str, f64)]) -> Result<()> {
         let mut xml = format!("<newNumberVector device=\"{}\" name=\"{}\">\n", self.device_name, name);
         for (number_name, value) in numbers {
             xml.push_str(&format!("  <oneNumber name=\"{}\">{:.10}</oneNumber>\n", number_name, value));
@@ -217,21 +450,13 @@ impl IndiClient {
     }
 
     /// Send raw command
-    pub async fn send_command(&mut self, cmd: &str) -> Result<()> {
-        self.stream
-            .write_all(cmd.as_bytes())
-            .await
-            .map_err(|e| IndiError::Communication(format!("Failed to send command: {}", e)))
-    }
-
-    /// Read response from server
-    pub async fn read_response(&mut self, buffer_size: usize) -> Result<String> {
-        let mut buffer = vec![0u8; buffer_size];
-        match timeout(Duration::from_secs(5), self.stream.read(&mut buffer)).await {
-            Ok(Ok(n)) => Ok(String::from_utf8_lossy(&buffer[..n]).to_string()),
-            Ok(Err(e)) => Err(IndiError::Communication(format!("Read error: {}", e))),
-            Err(_) => Ok(String::new()), // Timeout
-        }
+    pub async fn send_command(&self, cmd: &str) -> Result<()> {
+        let mut writer = self.writer.lock().await;
+        writer.write_all(cmd.as_bytes()).await
+            .map_err(|e| IndiError::Communication(format!("Failed to send command: {}", e)))?;
+        writer.flush().await
+            .map_err(|e| IndiError::Communication(format!("Failed to flush command: {}", e)))?;
+        Ok(())
     }
 
     /// Validate coordinates
@@ -247,62 +472,6 @@ impl IndiClient {
         Ok(())
     }
 
-    /// Parse coordinates from XML response
-    pub fn parse_coordinates(&self, response: &str) -> (f64, f64) {
-        let coord_section = response.split("EQUATORIAL_EOD_COORD").last();
-        
-        let ra = coord_section
-            .and_then(|s| s.find("<oneNumber name=\"RA\">"))
-            .and_then(|pos| {
-                let after = &coord_section.unwrap()[pos + 21..];
-                after.find("</oneNumber>")
-                    .and_then(|end| after[..end].trim().parse::<f64>().ok())
-            })
-            .unwrap_or(0.0);
-
-        let dec = coord_section
-            .and_then(|s| s.find("<oneNumber name=\"DEC\">"))
-            .and_then(|pos| {
-                let after = &coord_section.unwrap()[pos + 22..];
-                after.find("</oneNumber>")
-                    .and_then(|end| after[..end].trim().parse::<f64>().ok())
-            })
-            .unwrap_or(0.0);
-
-        (ra, dec)
-    }
-
-    /// Extract error/warning messages
-    fn extract_error(&self, response: &str) -> Option<String> {
-        for line in response.lines() {
-            if line.contains("<message") && (line.contains("WARNING") || line.contains("ERROR")) {
-                if let Some(start) = line.find("message=\"") {
-                    if let Some(end) = line[start + 9..].find("\"") {
-                        return Some(line[start + 9..start + 9 + end].to_string());
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    /// Parse tracking state from XML response
-    pub fn parse_tracking_state(&self, response: &str) -> bool {
-        if let Some(track_section) = response.split("TELESCOPE_TRACK_STATE").nth(1) {
-            // Look for TRACK_ON switch
-            if let Some(track_on_section) = track_section.split("TRACK_ON").nth(1) {
-                // Find the content between > and </oneSwitch>
-                if let Some(start) = track_on_section.find('>') {
-                    if let Some(end) = track_on_section[start..].find("</oneSwitch>") {
-                        let content = track_on_section[start + 1..start + end].trim();
-                        return content == "On";
-                    }
-                }
-            }
-        }
-        false
-    }
-
     /// Print goto information
     fn print_goto_info(&self, current: (f64, f64), target: (f64, f64)) {
         println!("📡 Mount Status:");
@@ -315,116 +484,7 @@ impl IndiClient {
             delta_ra, delta_ra * 60.0, delta_dec, delta_dec * 60.0);
     }
 
-    /// Display final status
-    fn display_final_status(&self, response: &str) {
-        println!("\n╔══════════════════════════════════════════╗");
-        println!("║         Final Mount Status               ║");
-        println!("╚══════════════════════════════════════════╝\n");
-
-        let (ra, dec) = self.parse_coordinates(response);
-        if ra != 0.0 || dec != 0.0 {
-            println!("📍 Position: RA {:.6}h, DEC {:.6}°", ra, dec);
-            
-            let ra_hms = format!("{}h {}m {:.1}s",
-                ra.trunc(),
-                (ra.fract() * 60.0).trunc(),
-                (ra.fract() * 60.0).fract() * 60.0);
-            let dec_dms = format!("{}° {}' {:.1}\"",
-                dec.trunc(),
-                (dec.fract() * 60.0).abs().trunc(),
-                (dec.fract() * 60.0).abs().fract() * 60.0);
-            println!("            ({}, {})", ra_hms, dec_dms);
-        }
-
-        let tracking = self.parse_tracking_state(response);
-        
-        println!("🔧 Tracking: {}", if tracking { "✅ ENABLED" } else { "⚠️  DISABLED" });
-        
-        // Debug tracking state if disabled
-        if !tracking {
-            self.debug_tracking_state(response);
-        }
-        
-        // Parse horizontal coords if available
-        if let Some(horiz) = response.split("HORIZONTAL_COORD").nth(1) {
-            if let Some(alt_start) = horiz.find("<oneNumber name=\"ALT\">") {
-                if let Some(alt_end) = horiz[alt_start + 22..].find("</oneNumber>") {
-                    if let Ok(alt) = horiz[alt_start + 22..alt_start + 22 + alt_end].trim().parse::<f64>() {
-                        if let Some(az_start) = horiz.find("<oneNumber name=\"AZ\">") {
-                            if let Some(az_end) = horiz[az_start + 21..].find("</oneNumber>") {
-                                if let Ok(az) = horiz[az_start + 21..az_start + 21 + az_end].trim().parse::<f64>() {
-                                    println!("🧭 Altitude: {:.2}°, Azimuth: {:.2}°", alt, az);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        println!("\n══════════════════════════════════════════\n");
-    }
-
-    /// Debug helper to print tracking state info from XML
-    pub fn debug_tracking_state(&self, response: &str) {
-        println!("🔍 Debug: Searching for TELESCOPE_TRACK_STATE...");
-        
-        if let Some(track_section) = response.split("TELESCOPE_TRACK_STATE").nth(1) {
-            // Get first 500 chars of the section
-            let preview = if track_section.len() > 500 {
-                &track_section[..500]
-            } else {
-                track_section
-            };
-            println!("   Found TELESCOPE_TRACK_STATE section:");
-            println!("   {}", preview.replace('\n', "\n   "));
-            
-            // Parse tracking with detailed info
-            let has_track_on = track_section.contains("TRACK_ON");
-            let tracking = self.parse_tracking_state(response);
-            
-            // Extract actual content
-            let content = if let Some(track_on_section) = track_section.split("TRACK_ON").nth(1) {
-                if let Some(start) = track_on_section.find('>') {
-                    if let Some(end) = track_on_section[start..].find("</oneSwitch>") {
-                        let raw = &track_on_section[start + 1..start + end];
-                        format!("\"{}\" (trimmed: \"{}\")", raw, raw.trim())
-                    } else {
-                        "end tag not found".to_string()
-                    }
-                } else {
-                    "start > not found".to_string()
-                }
-            } else {
-                "TRACK_ON not found".to_string()
-            };
-            
-            println!("\n   has TRACK_ON: {}", has_track_on);
-            println!("   TRACK_ON content: {}", content);
-            println!("   parsed tracking: {}", tracking);
-        } else {
-            println!("   ❌ TELESCOPE_TRACK_STATE not found in response!");
-            println!("   Response contains {} bytes", response.len());
-        }
-    }
-
     pub fn device_name(&self) -> &str {
         &self.device_name
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_coordinate_validation() {
-        // Valid coordinates
-        assert!((0.0..=24.0).contains(&12.5));
-        assert!((-90.0..=90.0).contains(&45.0));
-        
-        // Invalid coordinates
-        assert!(!(0.0..=24.0).contains(&25.0));
-        assert!(!(0.0..=24.0).contains(&-1.0));
-        assert!(!(-90.0..=90.0).contains(&91.0));
-        assert!(!(-90.0..=90.0).contains(&-91.0));
     }
 }
