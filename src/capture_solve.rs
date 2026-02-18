@@ -6,6 +6,8 @@
 use std::path::PathBuf;
 use std::time::Instant;
 use tokio::sync::broadcast::Sender;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use astro_pi_plate_solving::{
     solve_plate, Arcdegrees, CoordinateEquatorial, PlateSolvingResult, RaHoursMinutesSeconds,
@@ -145,11 +147,17 @@ pub fn make_initial_guess(
     )
 }
 
-fn take_lights(camera: &CameraController, settings: &CaptureSettings, count: u32, sender: &Sender<String>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn take_lights(camera: &CameraController, settings: &CaptureSettings, count: u32, sender: &Sender<String>, is_running: &Arc<AtomicBool>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let lights_dir = settings.save_directory.join("lights");
     std::fs::create_dir_all(&lights_dir)?;
     let mut paths = Vec::new();
     for i in 0..count {
+        if !is_running.load(Ordering::Relaxed) {
+             let msg = "Plan cancelled manually.".to_string();
+             println!("{}", msg);
+             let _ = sender.send(msg);
+             return Ok(paths);
+        }
         let msg = format!("Capturing light frame {}/{}...", i + 1, count);
         println!("{}", msg);
         let _ = sender.send(msg);
@@ -168,11 +176,17 @@ fn take_lights(camera: &CameraController, settings: &CaptureSettings, count: u32
     Ok(paths)
 }
 
-fn take_darks(camera: &CameraController, settings: &CaptureSettings, count: u32, sender: &Sender<String>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn take_darks(camera: &CameraController, settings: &CaptureSettings, count: u32, sender: &Sender<String>, is_running: &Arc<AtomicBool>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let dark_dir = settings.save_directory.join("darks");
     std::fs::create_dir_all(&dark_dir)?;
     let mut paths = Vec::new();
     for i in 0..count {
+        if !is_running.load(Ordering::Relaxed) {
+             let msg = "Plan cancelled manually.".to_string();
+             println!("{}", msg);
+             let _ = sender.send(msg);
+             return Ok(paths);
+        }
         let msg = format!("Capturing dark frame {}/{}...", i + 1, count);
         println!("{}", msg);
         let _ = sender.send(msg);
@@ -192,11 +206,17 @@ fn take_darks(camera: &CameraController, settings: &CaptureSettings, count: u32,
     Ok(paths)
 }
 
-fn take_biases(camera: &CameraController, settings: &CaptureSettings, count: u32, sender: &Sender<String>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn take_biases(camera: &CameraController, settings: &CaptureSettings, count: u32, sender: &Sender<String>, is_running: &Arc<AtomicBool>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let bias_dir = settings.save_directory.join("biases");
     std::fs::create_dir_all(&bias_dir)?;
     let mut paths = Vec::new();
     for i in 0..count {
+        if !is_running.load(Ordering::Relaxed) {
+             let msg = "Plan cancelled manually.".to_string();
+             println!("{}", msg);
+             let _ = sender.send(msg);
+             return Ok(paths);
+        }
         let msg = format!("Capturing bias frame {}/{}...", i + 1, count);
         println!("{}", msg);
         let _ = sender.send(msg);
@@ -222,14 +242,18 @@ pub fn planify_shoot(
     nb_lights : u32, 
     nb_darks : u32, 
     nb_biases : u32,
-    sender: &Sender<String>
+    sender: &Sender<String>,
+    is_running: &Arc<AtomicBool>
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting planified shoot...");
     let _ = sender.send("Starting planified shoot...".to_string());
 
-    let light_paths = take_lights(camera, settings, nb_lights, sender)?;
-    let dark_paths = take_darks(camera, settings, nb_darks, sender)?;
-    let bias_paths = take_biases(camera, settings, nb_biases, sender)?;
+    let light_paths = take_lights(camera, settings, nb_lights, sender, is_running)?;
+    if !is_running.load(Ordering::Relaxed) { return Ok(()); }
+    let dark_paths = take_darks(camera, settings, nb_darks, sender, is_running)?;
+    if !is_running.load(Ordering::Relaxed) { return Ok(()); }
+    let bias_paths = take_biases(camera, settings, nb_biases, sender, is_running)?;
+    if !is_running.load(Ordering::Relaxed) { return Ok(()); }
     
     let msg = format!("Planified shoot complete! Captured {} lights, {} darks, {} biases.",
              light_paths.len(), dark_paths.len(), bias_paths.len());

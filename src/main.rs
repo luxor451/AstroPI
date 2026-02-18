@@ -7,6 +7,8 @@ use tokio::sync::{Mutex, broadcast};
 use std::path::PathBuf;
 use tokio_stream::wrappers::BroadcastStream;
 use futures::StreamExt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use goto_closed_loop::{init_eqmod_goto, goto_closed_loop, init_eqmod_disconnect, GotoState};
 use crate::capture_solve::{planify_shoot, make_initial_guess, CaptureSettings};
@@ -21,6 +23,7 @@ struct AppState {
     camera: Mutex<Option<CameraController>>,
     goto_state: Mutex<GotoState>,
     event_sender: broadcast::Sender<String>,
+    is_running: Arc<AtomicBool>,
 }
 
 #[derive(Deserialize)]
@@ -51,6 +54,14 @@ async fn receive_command(info: web::Json<CommandCheck>) -> impl Responder {
         return HttpResponse::Ok().body("Function launched successfully");
     }
     HttpResponse::BadRequest().body("Unknown command")
+}
+
+#[post("/stop")]
+async fn handle_stop(data: web::Data<AppState>) -> impl Responder {
+    println!("Received Stop request");
+    let _ = data.event_sender.send("Received Stop request".to_string());
+    data.is_running.store(false, Ordering::Relaxed);
+    HttpResponse::Ok().body("Stop signal sent")
 }
 
 #[get("/events")]
@@ -231,7 +242,10 @@ async fn handle_planify(
         save_directory: PathBuf::from("imgs/astro_captures"),
     };
     
-    match planify_shoot(&*camera, &capture_settings, lights, darks, biases, &data.event_sender) {
+    // Set running state to true before starting
+    data.is_running.store(true, Ordering::Relaxed);
+
+    match planify_shoot(&*camera, &capture_settings, lights, darks, biases, &data.event_sender, &data.is_running) {
         Ok(_) => HttpResponse::Ok().body("Plan completed successfully"),
         Err(e) => {
             eprintln!("Plan failed: {}", e);
@@ -293,6 +307,7 @@ async fn main() -> std::io::Result<()> {
         camera: Mutex::new(camera),
         goto_state: Mutex::new(GotoState::default()),
         event_sender: tx,
+        is_running: Arc::new(AtomicBool::new(false)),
     });
 
     println!("Starting server at http://0.0.0.0:8080");
