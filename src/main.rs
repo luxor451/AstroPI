@@ -321,6 +321,7 @@ async fn main() -> std::io::Result<()> {
             .service(receive_command)
             .service(handle_goto)
             .service(handle_planify)
+            .service(handle_stop)
             .service(handle_disconnect)
             .service(handle_connect_camera)
             .service(sse_events)
