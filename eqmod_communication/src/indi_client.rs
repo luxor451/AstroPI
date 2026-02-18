@@ -44,6 +44,7 @@ pub struct IndiClient {
     writer: Arc<Mutex<OwnedWriteHalf>>,
     state: Arc<RwLock<IndiState>>,
     device_name: String,
+    sender: Option<tokio::sync::broadcast::Sender<String>>,
 }
 
 impl IndiClient {
@@ -53,7 +54,7 @@ impl IndiClient {
     /// * `host` - INDI server host (e.g., "localhost")
     /// * `port` - INDI server port (default is 7624)
     /// * `device_name` - Name of the telescope device (e.g., "EQMod Mount")
-    pub async fn new(host: &str, port: u16, device_name: &str) -> Result<Self> {
+    pub async fn new(host: &str, port: u16, device_name: &str, sender: Option<tokio::sync::broadcast::Sender<String>>) -> Result<Self> {
         let addr = format!("{}:{}", host, port);
         let stream = TcpStream::connect(&addr)
             .await
@@ -72,6 +73,7 @@ impl IndiClient {
             writer: Arc::new(Mutex::new(writer)),
             state,
             device_name: device_name.to_string(),
+            sender,
         };
 
         // Send initial getProperties
@@ -331,8 +333,13 @@ impl IndiClient {
             let delta_ra = (ra - last_pos.0).abs();
             let delta_dec = (dec - last_pos.1).abs();
 
-            println!("[{:2}s] {} Poiting to : - RA: {:.6}h, DEC: {:.6}° (ΔRA:{:.4}h, ΔDEC:{:.4}°)",
+            let msg = format!("[{:2}s] {} Pointing to : - RA: {:.6}h, DEC: {:.6}° (ΔRA:{:.4}h, ΔDEC:{:.4}°)",
                 elapsed, status, ra, dec, delta_ra, delta_dec);
+            
+            println!("{}", msg);
+            if let Some(sender) = &self.sender {
+                let _ = sender.send(msg);
+            }
 
             last_pos = (ra, dec);
 

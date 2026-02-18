@@ -26,9 +26,9 @@ impl Default for GotoState {
     }
 }
 
-pub async fn init_eqmod_goto(latitude : f64, longitude: f64, elevation: f64) -> Result<IndiClient, IndiError> {
+pub async fn init_eqmod_goto(latitude : f64, longitude: f64, elevation: f64, sender: Sender<String>) -> Result<IndiClient, IndiError> {
     // Connect to EQMOD via INDI
-    let mut indi_client = IndiClient::new("localhost", PORT, DEVICE_NAME).await?;
+    let mut indi_client = IndiClient::new("localhost", PORT, DEVICE_NAME, Some(sender)).await?;
     indi_client.connect().await?;
     indi_client.init_date_pos(latitude, longitude, elevation).await?;
     Ok(indi_client)

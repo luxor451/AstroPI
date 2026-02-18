@@ -278,7 +278,7 @@ async fn main() -> std::io::Result<()> {
         }
     };
     
-    let indi_client = match init_eqmod_goto(LATITUDE, LONGITUDE, ELEVATION).await {
+    let indi_client = match init_eqmod_goto(LATITUDE, LONGITUDE, ELEVATION, tx.clone()).await {
         Ok(c) => {
             println!("EQMod connected successfully.");
             let _ = tx.send("EQMod connected successfully.".to_string());
