@@ -81,7 +81,13 @@ async fn take_preview(data: web::Data<AppState>, payload: web::Json<TakepreviewP
         aperture_str.parse::<f64>().ok()
     };
 
-    match camera.take_photo(iso, aperture, exposure_seconds, &PathBuf::from("imgs/previews")) {
+    let preview_dir = PathBuf::from("imgs/previews");
+    if let Err(e) = std::fs::create_dir_all(&preview_dir) {
+        eprintln!("Failed to create preview directory: {}", e);
+        return HttpResponse::InternalServerError().body(format!("Failed to create directory: {}", e));
+    }
+
+    match camera.take_photo(iso, aperture, exposure_seconds, &preview_dir) {
         Ok(path) => {
             let jpg_path = path.with_extension("jpg");
             let result_response = if let Err(e) = cr3_to_png(&path, &jpg_path) {
