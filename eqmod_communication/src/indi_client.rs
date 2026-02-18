@@ -270,7 +270,7 @@ impl IndiClient {
     }
 
     /// Set UTC time and date for the mount
-    async fn set_time(&self, utc_datetime: &str) -> Result<()> {      
+    pub async fn set_time(&self, utc_datetime: &str) -> Result<()> {      
         self.send_command(&format!(
             "<newTextVector device=\"{}\" name=\"TIME_UTC\">\n  <oneText name=\"UTC\">{}</oneText>\n  <oneText name=\"OFFSET\">0.0</oneText>\n</newTextVector>\n",
             self.device_name, utc_datetime

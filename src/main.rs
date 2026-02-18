@@ -109,6 +109,44 @@ async fn update_location(
     HttpResponse::Ok().body("Location updated successfully")
 }
 
+#[derive(Serialize, Deserialize)]
+struct TimePayload {
+    utc_datetime: String, // Format: YYYY-MM-DDTHH:MM:SS
+}
+
+#[post("/time")]
+async fn update_time(
+    payload: web::Json<TimePayload>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    println!("Received time update: {}", payload.utc_datetime);
+
+    // Send event to listening clients
+    let _ = data.event_sender.send(format!(
+        "Time updated: {}",
+        payload.utc_datetime
+    ));
+
+    // Update hardware if necessary
+    let client_opt = data.indi_client.lock().await;
+    if let Some(client) = client_opt.as_ref() {
+        if let Err(e) = client.set_time(&payload.utc_datetime).await {
+            eprintln!("Failed to update time on EQMod: {}", e);
+            let _ = data
+                .event_sender
+                .send(format!("Failed to update time on EQMod: {}", e));
+            return HttpResponse::InternalServerError().body(format!("Failed to update time on EQMod: {}", e));
+        } else {
+            println!("Time updated on EQMod.");
+            let _ = data
+                .event_sender
+                .send("Time updated on EQMod.".to_string());
+        }
+    }
+
+    HttpResponse::Ok().body("Time updated successfully")
+}
+
 #[derive(Deserialize)]
 struct TakepreviewPayload {
     iso: String,
@@ -530,6 +568,7 @@ async fn main() -> std::io::Result<()> {
             .service(ping)
             .service(get_location)
             .service(update_location)
+            .service(update_time)
     })
     .bind(("0.0.0.0", 8080))?
     .run()
