@@ -501,6 +501,16 @@ async fn handle_status(data: web::Data<AppState>) -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    println!("Starting INDI server...");
+    // Start INDI server as a child process
+    let mut indi_server = std::process::Command::new("indiserver")
+        .arg("indi_eqmod_telescope")
+        .spawn()
+        .expect("Failed to start INDI server");
+
+    // Give it a moment to initialize
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
     println!("Initializing hardware...");
 
     let (tx, _rx) = broadcast::channel(100);
