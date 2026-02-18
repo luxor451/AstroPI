@@ -72,6 +72,32 @@ async fn sse_events(data: web::Data<AppState>) -> impl Responder {
         .streaming(stream)
 }
 
+#[post("/connect_camera")]
+async fn handle_connect_camera(data: web::Data<AppState>) -> impl Responder {
+    println!("Received Connect Camera request"); 
+    let _ = data.event_sender.send("Received Connect Camera request".to_string());
+
+    let mut camera_opt = data.camera.lock().await; 
+    if camera_opt.is_some() {
+        let _ = data.event_sender.send("Camera already connected.".to_string());
+        return HttpResponse::Ok().body("Camera already connected");
+    }
+
+    match CameraController::connect() {
+        Ok(c) => {
+            *camera_opt = Some(c);
+            println!("Camera connected successfully.");
+            let _ = data.event_sender.send("Camera connected successfully.".to_string());
+            HttpResponse::Ok().body("Camera connected successfully")
+        },
+        Err(e) => {
+            eprintln!("Failed to connect to camera: {}", e);
+             let _ = data.event_sender.send(format!("Failed to connect to camera: {}", e));
+            HttpResponse::InternalServerError().body(format!("Failed to connect to camera: {}", e))
+        }
+    }
+}
+
 #[post("/disconnect")]
 async fn handle_disconnect(data: web::Data<AppState>) -> impl Responder {
     println!("Received Disconnect request");
@@ -160,7 +186,9 @@ async fn handle_goto(
 
     let mut goto_state = data.goto_state.lock().await;
 
-    match goto_closed_loop(&mut *client, &*camera, platesolve_settings, &mut *goto_state, target, true, &data.event_sender).await {
+    // TODO : add true instead of false for closed loop after testing
+
+    match goto_closed_loop(&mut *client, &*camera, platesolve_settings, &mut *goto_state, target, false, &data.event_sender).await {
         Ok(_) => HttpResponse::Ok().body("GoTo completed successfully"),
         Err(e) => {
             eprintln!("GoTo failed: {}", e);
@@ -169,7 +197,7 @@ async fn handle_goto(
         },
     }
 }
-
+ 
 #[post("/planify")]
 async fn handle_planify(
     payload: web::Json<PlanifyPayload>,
@@ -264,6 +292,7 @@ async fn main() -> std::io::Result<()> {
             .service(handle_goto)
             .service(handle_planify)
             .service(handle_disconnect)
+            .service(handle_connect_camera)
             .service(sse_events)
     })
     .bind(("0.0.0.0", 8080))?
