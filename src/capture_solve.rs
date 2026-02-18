@@ -145,7 +145,9 @@ pub fn make_initial_guess(
     )
 }
 
-fn take_lights(camera: &CameraController, settings: &CaptureSettings, count: u32, sender: &Sender<String>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+use tokio::time::{sleep, Duration};
+
+async fn take_lights(camera: &CameraController, settings: &CaptureSettings, count: u32, sender: &Sender<String>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let lights_dir = settings.save_directory.join("lights");
     std::fs::create_dir_all(&lights_dir)?;
     let mut paths = Vec::new();
@@ -153,6 +155,9 @@ fn take_lights(camera: &CameraController, settings: &CaptureSettings, count: u32
         let msg = format!("Capturing light frame {}/{}...", i + 1, count);
         println!("{}", msg);
         let _ = sender.send(msg);
+
+        // Yield to the runtime to allow other tasks (like SSE) to run
+        sleep(Duration::from_millis(100)).await;
 
         let path = camera.take_photo(
             settings.iso,
@@ -168,7 +173,7 @@ fn take_lights(camera: &CameraController, settings: &CaptureSettings, count: u32
     Ok(paths)
 }
 
-fn take_darks(camera: &CameraController, settings: &CaptureSettings, count: u32, sender: &Sender<String>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+async fn take_darks(camera: &CameraController, settings: &CaptureSettings, count: u32, sender: &Sender<String>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let dark_dir = settings.save_directory.join("darks");
     std::fs::create_dir_all(&dark_dir)?;
     let mut paths = Vec::new();
@@ -176,6 +181,9 @@ fn take_darks(camera: &CameraController, settings: &CaptureSettings, count: u32,
         let msg = format!("Capturing dark frame {}/{}...", i + 1, count);
         println!("{}", msg);
         let _ = sender.send(msg);
+
+        // Yield to the runtime
+        sleep(Duration::from_millis(100)).await;
 
         let path = camera.take_photo(
             settings.iso,
@@ -192,7 +200,7 @@ fn take_darks(camera: &CameraController, settings: &CaptureSettings, count: u32,
     Ok(paths)
 }
 
-fn take_biases(camera: &CameraController, settings: &CaptureSettings, count: u32, sender: &Sender<String>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+async fn take_biases(camera: &CameraController, settings: &CaptureSettings, count: u32, sender: &Sender<String>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let bias_dir = settings.save_directory.join("biases");
     std::fs::create_dir_all(&bias_dir)?;
     let mut paths = Vec::new();
@@ -200,6 +208,9 @@ fn take_biases(camera: &CameraController, settings: &CaptureSettings, count: u32
         let msg = format!("Capturing bias frame {}/{}...", i + 1, count);
         println!("{}", msg);
         let _ = sender.send(msg);
+
+        // Yield to the runtime
+        sleep(Duration::from_millis(100)).await;
 
         let path = camera.take_photo(
             settings.iso,
@@ -216,7 +227,7 @@ fn take_biases(camera: &CameraController, settings: &CaptureSettings, count: u32
     Ok(paths)
 }
 
-pub fn planify_shoot(
+pub async fn planify_shoot(
     camera: &CameraController, 
     settings: &CaptureSettings, 
     nb_lights : u32, 
@@ -227,9 +238,9 @@ pub fn planify_shoot(
     println!("Starting planified shoot...");
     let _ = sender.send("Starting planified shoot...".to_string());
 
-    let light_paths = take_lights(camera, settings, nb_lights, sender)?;
-    let dark_paths = take_darks(camera, settings, nb_darks, sender)?;
-    let bias_paths = take_biases(camera, settings, nb_biases, sender)?;
+    let light_paths = take_lights(camera, settings, nb_lights, sender).await?;
+    let dark_paths = take_darks(camera, settings, nb_darks, sender).await?;
+    let bias_paths = take_biases(camera, settings, nb_biases, sender).await?;
     
     let msg = format!("Planified shoot complete! Captured {} lights, {} darks, {} biases.",
              light_paths.len(), dark_paths.len(), bias_paths.len());

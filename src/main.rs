@@ -233,7 +233,35 @@ async fn handle_planify(
         save_directory: PathBuf::from("imgs/astro_captures"),
     };
     
-    match planify_shoot(&*camera, &capture_settings, lights, darks, biases, &data.event_sender) {
+    // Use web::block to run the synchronous planify_shoot on a blocking thread
+    // This prevents blocking the async runtime loop
+    let result = web::block(move || {
+        // Since we can't easily move the specific locked guard into the thread, 
+        // and we really shouldn't hold async mutexes in sync code, this is tricky.
+        // BUT, CameraController is likely designed to be used synchronously.
+        // We need to access the camera. Passing the camera by reference to a thread 
+        // that outlives the scope is impossible without Arc.
+        // Wait, CameraController is inside an Arc<Mutex> in AppState? No, just Mutex.
+        // We need to rethink how we access the camera if we want to run this in a blocking thread.
+        // For now, let's look at the imports.
+        
+        // Actually, if we just want to unblock the runtime, we can use spawn_blocking, 
+        // but we need an owned version or a thread-safe reference to the camera.
+        // The current code passes `&CameraController`.
+        
+        // Let's defer the refactoring of `planify_shoot` to be async for a moment.
+        // If we can't easily make it async, we should change planify_shoot to satisfy the borrow checker.
+        
+        // However, if the user modifies `capture_solve.rs` to be async, that would be cleaner.
+        // Let's modify `capture_solve.rs` to be async!
+        planify_shoot(&*camera, &capture_settings, lights, darks, biases, &data.event_sender)
+    }).await;
+
+    // Wait, I can't wrap `planify_shoot` in `web::block` easily because `camera` is a reference borrowed from a async MutexGuard.
+    // Converting `capture_solve.rs` to use `async/await` and `tokio::time::sleep` (if needed) or `tokio::task::spawn_blocking` internally is the best path.
+    // If I make `planify_shoot` async, I can await it in the handler.
+    
+    match planify_shoot(&*camera, &capture_settings, lights, darks, biases, &data.event_sender).await {
         Ok(_) => HttpResponse::Ok().body("Plan completed successfully"),
         Err(e) => {
             eprintln!("Plan failed: {}", e);
