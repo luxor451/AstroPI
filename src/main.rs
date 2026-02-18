@@ -13,6 +13,9 @@ use std::sync::Arc;
 use goto_closed_loop::{init_eqmod_goto, goto_closed_loop, init_eqmod_disconnect, GotoState};
 use crate::capture_solve::{planify_shoot, make_initial_guess, CaptureSettings};
 use camera_control::CameraController;
+use astro_pi_plate_solving::cr3_to_png;
+
+// TODO : move these constants to a config file or environment variables
 
 const LATITUDE: f64 = 42.960213;   // degrees North
 const LONGITUDE: f64 = 1.609226;   // degrees East
@@ -43,10 +46,82 @@ struct PlanifyPayload {
 }
 
 #[derive(Deserialize)]
+struct TakepreviewPayload {
+    iso: String,
+    exposure: String,
+    aperture: String,
+}
+
+#[derive(Deserialize)]
 struct CommandCheck {
     action: String,
 }
 
+
+
+
+
+
+#[post("/take_preview")]
+async fn take_preview(data: web::Data<AppState>, payload: web::Json<TakepreviewPayload>) -> impl Responder {
+    println!("Received preview command");
+    let camera_opt = data.camera.lock().await;
+    let camera = match camera_opt.as_ref() {
+        Some(c) => c,
+        None => return HttpResponse::InternalServerError().body("Camera not connected"),
+    };
+
+
+    let iso = payload.iso.parse::<u64>().unwrap_or(1600);
+    let exposure_seconds = payload.exposure.parse::<u64>().unwrap_or(5);
+    let aperture_str = payload.aperture.trim().replace("f/", "");
+    let aperture = if aperture_str.is_empty() {
+        None
+    } else {
+        aperture_str.parse::<f64>().ok()
+    };
+
+    match camera.take_photo(iso, aperture, exposure_seconds, &PathBuf::from("imgs/previews")) {
+        Ok(path) => {
+            let jpg_path = path.with_extension("jpg");
+            let result_response = if let Err(e) = cr3_to_png(&path, &jpg_path) {
+                eprintln!("Failed to convert preview to PNG: {}", e);
+                let _ = data.event_sender.send(format!("Failed to convert preview to PNG: {}", e));
+                HttpResponse::InternalServerError().body(format!("Conversion failed: {}", e))
+            } else {
+                println!("Preview saved at: {}", jpg_path.display());
+                let _ = data.event_sender.send(format!("Preview saved at: {}", jpg_path.display()));
+                
+                match std::fs::read(&jpg_path) {
+                    Ok(bytes) => {
+                        // Clean up the converted file after reading it
+                        std::fs::remove_file(&jpg_path).ok(); 
+                        HttpResponse::Ok()
+                            .content_type("image/jpeg") 
+                            .body(bytes)
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to read preview file: {}", e);
+                        // Clean up if read failed
+                        std::fs::remove_file(&jpg_path).ok();
+                        HttpResponse::InternalServerError().body("Failed to read preview file")
+                    }
+                }
+            };
+            
+            // Clean up original CR3 file (path)
+            std::fs::remove_file(path).ok();
+            
+            result_response
+        },
+        Err(e) => {
+            eprintln!("Preview failed: {}", e);
+            let _ = data.event_sender.send(format!("Preview failed: {}", e));
+            HttpResponse::InternalServerError().body(format!("Preview failed: {}", e))
+        },
+    }
+
+}
 #[post("/command")]
 async fn receive_command(info: web::Json<CommandCheck>) -> impl Responder {
     println!("Received command: {}", info.action);
@@ -186,6 +261,8 @@ async fn handle_goto(
     // Cast ra parts to i64 as required by make_initial_guess
     let target = make_initial_guess(ra.0 as i64, ra.1 as i64, ra.2, dec.0, dec.1, dec.2);
     
+    // TODO : add real capture settings for platesolve instead of hardcoded ones
+
     let platesolve_settings = CaptureSettings {
         iso: 3200,
         aperture: None,
@@ -326,6 +403,7 @@ async fn main() -> std::io::Result<()> {
             .service(handle_connect_camera)
             .service(sse_events)
             .service(handle_status)
+            .service(take_preview)
     })
     .bind(("0.0.0.0", 8080))?
     .run()
