@@ -33,7 +33,7 @@ pub async fn init_eqmod_goto(latitude : f64, longitude: f64, elevation: f64) -> 
     Ok(indi_client)
 }
 
-pub async fn goto_closed_loop(client : &mut IndiClient, camera : &CameraController, setting : CaptureSettings, state : &mut GotoState, target_pos: CoordinateEquatorial) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn goto_closed_loop(client : &mut IndiClient, camera : &CameraController, setting : CaptureSettings, state : &mut GotoState, target_pos: CoordinateEquatorial , close_loop : bool) -> Result<(), Box<dyn std::error::Error>> {
     // Set target coordinates
 
     let mut error_ra_h = state.offset_ra_h;
@@ -42,6 +42,10 @@ pub async fn goto_closed_loop(client : &mut IndiClient, camera : &CameraControll
     let target_ra = target_pos.ra.to_hours() + error_ra_h;
     let target_dec = target_pos.dec.to_degrees() + error_dec_deg;
     client.goto(target_ra, target_dec).await?;
+
+    if !close_loop {
+        return Ok(());
+    }
 
     tokio::time::sleep(std::time::Duration::from_secs(1)).await; // Wait for the mount to stop moving
 
@@ -64,6 +68,8 @@ pub async fn goto_closed_loop(client : &mut IndiClient, camera : &CameraControll
     println!("Initial position is {:.2}\" from target.", distance_arcsec);
 
     let mut i = 0;
+
+
 
     while distance_arcsec > TARGET_TOLLERANCE_ARCSEC && i < MAX_ITERATIONS {
 
