@@ -15,11 +15,15 @@ use astro_pi_plate_solving::cr3_to_png;
 use camera_control::CameraController;
 use goto_closed_loop::{goto_closed_loop, init_eqmod_disconnect, init_eqmod_goto, GotoState};
 
-// TODO : move these constants to a config file or environment variables
+// // TODO : move these constants to a config file or environment variables
 
-const LATITUDE: f64 = 42.960213; // degrees North
-const LONGITUDE: f64 = 1.609226; // degrees East
-const ELEVATION: f64 = 600.0; // meters
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Location {
+    latitude: f64,
+    longitude: f64,
+    elevation: f64,
+}
 
 struct AppState {
     indi_client: Mutex<Option<eqmod_communication::IndiClient>>,
@@ -27,6 +31,7 @@ struct AppState {
     goto_state: Mutex<GotoState>,
     event_sender: broadcast::Sender<String>,
     is_running: Arc<AtomicBool>,
+    location: Mutex<Location>,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +48,65 @@ struct PlanifyPayload {
     iso: String,
     exposure: String,
     aperture: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LocationPayload {
+    latitude: f64,
+    longitude: f64,
+    elevation: f64,
+}
+
+#[get("/location")]
+async fn get_location(data: web::Data<AppState>) -> impl Responder {
+    let loc = data.location.lock().await;
+    HttpResponse::Ok().json(LocationPayload {
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        elevation: loc.elevation,
+    })
+}
+
+#[post("/location")]
+async fn update_location(
+    payload: web::Json<LocationPayload>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    println!(
+        "Received location update: lat={}, lon={}, elev={}",
+        payload.latitude, payload.longitude, payload.elevation
+    );
+    let mut loc = data.location.lock().await;
+    loc.latitude = payload.latitude;
+    loc.longitude = payload.longitude;
+    loc.elevation = payload.elevation;
+
+    // Send event to listening clients
+    let _ = data.event_sender.send(format!(
+        "Location updated: {}, {}, {}",
+        payload.latitude, payload.longitude, payload.elevation
+    ));
+
+    // Update hardware if necessary (e.g. tell INDI/EQMod new coords)
+    let client_opt = data.indi_client.lock().await;
+    if let Some(client) = client_opt.as_ref() {
+        if let Err(e) = client
+            .set_location(payload.latitude, payload.longitude, payload.elevation)
+            .await
+        {
+            eprintln!("Failed to update location on EQMod: {}", e);
+            let _ = data
+                .event_sender
+                .send(format!("Failed to update location on EQMod: {}", e));
+        } else {
+            println!("Location updated on EQMod.");
+            let _ = data
+                .event_sender
+                .send("Location updated on EQMod.".to_string());
+        }
+    }
+
+    HttpResponse::Ok().body("Location updated successfully")
 }
 
 #[derive(Deserialize)]
@@ -439,6 +503,11 @@ async fn main() -> std::io::Result<()> {
         goto_state: Mutex::new(GotoState::default()),
         event_sender: tx,
         is_running: Arc::new(AtomicBool::new(false)),
+        location: Mutex::new(Location {
+            latitude: 0.0,
+            longitude: 0.0,
+            elevation: 0.0,
+        }),
     });
 
     println!("Starting server at http://0.0.0.0:8080");
@@ -459,6 +528,8 @@ async fn main() -> std::io::Result<()> {
             .service(handle_status)
             .service(take_preview)
             .service(ping)
+            .service(get_location)
+            .service(update_location)
     })
     .bind(("0.0.0.0", 8080))?
     .run()

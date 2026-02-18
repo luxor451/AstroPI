@@ -255,7 +255,7 @@ impl IndiClient {
     /// client.set_location(48.8566, 2.3522, 35.0).await.unwrap();
     /// # });
     /// ```
-    async fn set_location(&self, latitude: f64, longitude: f64, elevation: f64) -> Result<()> {
+    pub async fn set_location(&self, latitude: f64, longitude: f64, elevation: f64) -> Result<()> {
         assert!(elevation >= -500.0 && elevation <= 9000.0, "Elevation must be between -500 and 9000 meters");
         assert!(latitude >= -90.0 && latitude <= 90.0, "Latitude must be between -90 and +90 degrees");
         assert!(longitude >= -180.0 && longitude <= 180.0, "Longitude must be between -180 and +180 degrees");
