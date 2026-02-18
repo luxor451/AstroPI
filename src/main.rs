@@ -4,7 +4,7 @@ mod tui;
 mod goto_closed_loop;
 use actix_cors::Cors;
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 use std::path::PathBuf;
 use tokio_stream::wrappers::BroadcastStream;
@@ -243,6 +243,23 @@ async fn handle_planify(
     }
 }
 
+#[derive(Serialize)]
+struct StatusResponse {
+    camera_connected: bool,
+    eqmod_connected: bool,
+}
+
+#[get("/status")]
+async fn handle_status(data: web::Data<AppState>) -> impl Responder {
+    let camera_connected = data.camera.lock().await.is_some();
+    let eqmod_connected = data.indi_client.lock().await.is_some();
+    
+    HttpResponse::Ok().json(StatusResponse {
+        camera_connected,
+        eqmod_connected,
+    })
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     println!("Initializing hardware...");
@@ -294,6 +311,7 @@ async fn main() -> std::io::Result<()> {
             .service(handle_disconnect)
             .service(handle_connect_camera)
             .service(sse_events)
+            .service(handle_status)
     })
     .bind(("0.0.0.0", 8080))?
     .run()
