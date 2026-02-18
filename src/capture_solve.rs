@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 use std::time::Instant;
+use tokio::sync::broadcast::Sender;
 
 use astro_pi_plate_solving::{
     solve_plate, Arcdegrees, CoordinateEquatorial, PlateSolvingResult, RaHoursMinutesSeconds,
@@ -144,67 +145,97 @@ pub fn make_initial_guess(
     )
 }
 
-fn take_lights(camera: &CameraController, settings: &CaptureSettings, count: u32) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn take_lights(camera: &CameraController, settings: &CaptureSettings, count: u32, sender: &Sender<String>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let lights_dir = settings.save_directory.join("lights");
     std::fs::create_dir_all(&lights_dir)?;
     let mut paths = Vec::new();
     for i in 0..count {
-        println!("Capturing light frame {}/{}...", i + 1, count);
+        let msg = format!("Capturing light frame {}/{}...", i + 1, count);
+        println!("{}", msg);
+        let _ = sender.send(msg);
+
         let path = camera.take_photo(
             settings.iso,
             settings.aperture,
             settings.exposure_seconds,
             &lights_dir,
         )?;
-        println!("Captured: {}", path.display());
+        let msg_done = format!("Captured: {}", path.display());
+        println!("{}", msg_done);
+        let _ = sender.send(msg_done);
         paths.push(path);
     }
     Ok(paths)
 }
 
-fn take_darks(camera: &CameraController, settings: &CaptureSettings, count: u32) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
-    let darks_dir = settings.save_directory.join("darks");
-    std::fs::create_dir_all(&darks_dir)?;
+fn take_darks(camera: &CameraController, settings: &CaptureSettings, count: u32, sender: &Sender<String>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let dark_dir = settings.save_directory.join("darks");
+    std::fs::create_dir_all(&dark_dir)?;
     let mut paths = Vec::new();
     for i in 0..count {
-        println!("Capturing dark frame {}/{}...", i + 1, count);
+        let msg = format!("Capturing dark frame {}/{}...", i + 1, count);
+        println!("{}", msg);
+        let _ = sender.send(msg);
+
         let path = camera.take_photo(
             settings.iso,
             settings.aperture,
             settings.exposure_seconds,
-            &darks_dir,
+            &dark_dir,
         )?;
-        println!("Captured: {}", path.display());
+        
+        let msg_done = format!("Captured: {}", path.display());
+        println!("{}", msg_done);
+        let _ = sender.send(msg_done);
         paths.push(path);
     }
     Ok(paths)
 }
 
-fn take_biases(camera: &CameraController, settings: &CaptureSettings, count: u32) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn take_biases(camera: &CameraController, settings: &CaptureSettings, count: u32, sender: &Sender<String>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let bias_dir = settings.save_directory.join("biases");
     std::fs::create_dir_all(&bias_dir)?;
     let mut paths = Vec::new();
     for i in 0..count {
-        println!("Capturing bias frame {}/{}...", i + 1, count);
+        let msg = format!("Capturing bias frame {}/{}...", i + 1, count);
+        println!("{}", msg);
+        let _ = sender.send(msg);
+
         let path = camera.take_photo(
             settings.iso,
             settings.aperture,
             0, // Bias frames have zero exposure time
             &bias_dir,
         )?;
-        println!("Captured: {}", path.display());
+        
+        let msg_done = format!("Captured: {}", path.display());
+        println!("{}", msg_done);
+        let _ = sender.send(msg_done);
         paths.push(path);
     }
     Ok(paths)
 }
 
-pub fn planify_shoot(camera: &CameraController, settings: &CaptureSettings, nb_lights : u32, nb_darks : u32, nb_biases : u32) -> Result<(), Box<dyn std::error::Error>> {
+pub fn planify_shoot(
+    camera: &CameraController, 
+    settings: &CaptureSettings, 
+    nb_lights : u32, 
+    nb_darks : u32, 
+    nb_biases : u32,
+    sender: &Sender<String>
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting planified shoot...");
-    let light_paths = take_lights(camera, settings, nb_lights)?;
-    let dark_paths = take_darks(camera, settings, nb_darks)?;
-    let bias_paths = take_biases(camera, settings, nb_biases)?;
-    println!("Planified shoot complete! Captured {} lights, {} darks, {} biases.",
+    let _ = sender.send("Starting planified shoot...".to_string());
+
+    let light_paths = take_lights(camera, settings, nb_lights, sender)?;
+    let dark_paths = take_darks(camera, settings, nb_darks, sender)?;
+    let bias_paths = take_biases(camera, settings, nb_biases, sender)?;
+    
+    let msg = format!("Planified shoot complete! Captured {} lights, {} darks, {} biases.",
              light_paths.len(), dark_paths.len(), bias_paths.len());
+    println!("{}", msg);
+    let _ = sender.send(msg);
+
     Ok(())
 }
 

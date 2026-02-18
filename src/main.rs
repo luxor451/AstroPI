@@ -3,10 +3,12 @@ mod read_csv;
 mod tui;
 mod goto_closed_loop;
 use actix_cors::Cors;
-use actix_web::{post, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use serde::Deserialize;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
 use std::path::PathBuf;
+use tokio_stream::wrappers::BroadcastStream;
+use futures::StreamExt;
 
 use goto_closed_loop::{init_eqmod_goto, goto_closed_loop, init_eqmod_disconnect, GotoState};
 use crate::capture_solve::{planify_shoot, make_initial_guess, CaptureSettings};
@@ -17,9 +19,10 @@ const LONGITUDE: f64 = 1.609226;   // degrees East
 const ELEVATION: f64 = 600.0;     // meters
 
 struct AppState {
-    indi_client: Mutex<eqmod_communication::IndiClient>,
-    camera: Mutex<CameraController>,
+    indi_client: Mutex<Option<eqmod_communication::IndiClient>>,
+    camera: Mutex<Option<CameraController>>,
     goto_state: Mutex<GotoState>,
+    event_sender: broadcast::Sender<String>,
 }
 
 #[derive(Deserialize)]
@@ -52,12 +55,69 @@ async fn receive_command(info: web::Json<CommandCheck>) -> impl Responder {
     HttpResponse::BadRequest().body("Unknown command")
 }
 
+#[get("/events")]
+async fn sse_events(data: web::Data<AppState>) -> impl Responder {
+    let rx = data.event_sender.subscribe();
+    let stream = BroadcastStream::new(rx)
+        .filter_map(|item| async move {
+            match item {
+                Ok(msg) => Some(Ok::<_, actix_web::Error>(web::Bytes::from(format!("data: {}\n\n", msg)))),
+                Err(_e) => None, // Ignore errors (lagged/closed)
+            }
+        });
+
+    HttpResponse::Ok()
+        .insert_header(("Content-Type", "text/event-stream"))
+        .insert_header(("Cache-Control", "no-cache"))
+        .streaming(stream)
+}
+
+#[post("/disconnect")]
+async fn handle_disconnect(data: web::Data<AppState>) -> impl Responder {
+    println!("Received Disconnect request");
+
+    let mut client_opt = data.indi_client.lock().await;
+    if let Some(mut client) = client_opt.take() {
+        if let Err(e) = init_eqmod_disconnect(&mut client).await {
+            eprintln!("Error disconnecting EQMod: {}", e);
+        } else {
+            println!("EQMod disconnected.");
+            let _ = data.event_sender.send("EQMod disconnected.".to_string());
+        }
+    } else {
+        println!("EQMod not connected.");
+    }
+
+    let mut camera_opt = data.camera.lock().await;
+    if let Some(_camera) = camera_opt.take() {
+        println!("Camera disconnected (dropped).");
+        let _ = data.event_sender.send("Camera disconnected.".to_string());
+    } else {
+        println!("Camera not connected.");
+    }
+
+    HttpResponse::Ok().body("Disconnected successfully")
+}
+
 #[post("/goto")]
 async fn handle_goto(
     payload: web::Json<GoToPayload>,
     data: web::Data<AppState>,
 ) -> impl Responder {
     println!("Received GoTo request: RA={}, DEC={}", payload.ra, payload.dec);
+    let _ = data.event_sender.send(format!("Received GoTo request: RA={}, DEC={}", payload.ra, payload.dec));
+
+    let mut client_opt = data.indi_client.lock().await;
+    let client = match client_opt.as_mut() {
+        Some(c) => c,
+        None => return HttpResponse::InternalServerError().body("EQMod not connected"),
+    };
+
+    let camera_opt = data.camera.lock().await;
+    let camera = match camera_opt.as_ref() {
+        Some(c) => c,
+        None => return HttpResponse::InternalServerError().body("Camera not connected"),
+    };
 
     let parse_time = |s: &str| -> Option<(u8, u8, f64)> {
         let parts: Vec<&str> = s.trim().split(':').collect();
@@ -88,6 +148,7 @@ async fn handle_goto(
         None => return HttpResponse::BadRequest().body("Invalid DEC format. Expected DD:MM:SS"),
     };
 
+    // Cast ra parts to i64 as required by make_initial_guess
     let target = make_initial_guess(ra.0 as i64, ra.1 as i64, ra.2, dec.0, dec.1, dec.2);
     
     let platesolve_settings = CaptureSettings {
@@ -97,16 +158,13 @@ async fn handle_goto(
         save_directory: PathBuf::from("imgs/goto/captures"),
     };
 
-    let mut client = data.indi_client.lock().await;
-    let camera = data.camera.lock().await;
     let mut goto_state = data.goto_state.lock().await;
 
-    // TODO modifiy this (close_loop = false) to true when the function is ready
-
-    match goto_closed_loop(&mut *client, &*camera, platesolve_settings, &mut *goto_state, target, false).await {
+    match goto_closed_loop(&mut *client, &*camera, platesolve_settings, &mut *goto_state, target, true, &data.event_sender).await {
         Ok(_) => HttpResponse::Ok().body("GoTo completed successfully"),
         Err(e) => {
             eprintln!("GoTo failed: {}", e);
+            let _ = data.event_sender.send(format!("GoTo failed: {}", e));
             HttpResponse::InternalServerError().body(format!("GoTo failed: {}", e))
         },
     }
@@ -118,6 +176,14 @@ async fn handle_planify(
     data: web::Data<AppState>,
 ) -> impl Responder {
     println!("Received Planify request");
+    let _ = data.event_sender.send("Received Planify request".to_string());
+    
+    let camera_opt = data.camera.lock().await;
+    let camera = match camera_opt.as_ref() {
+        Some(c) => c,
+        None => return HttpResponse::InternalServerError().body("Camera not connected"),
+    };
+
 
     let lights = payload.lights.parse::<u32>().unwrap_or(0);
     let darks = payload.darks.parse::<u32>().unwrap_or(0);
@@ -138,13 +204,12 @@ async fn handle_planify(
         exposure_seconds: exposure,
         save_directory: PathBuf::from("imgs/astro_captures"),
     };
-
-    let camera = data.camera.lock().await;
     
-    match planify_shoot(&*camera, &capture_settings, lights, darks, biases) {
+    match planify_shoot(&*camera, &capture_settings, lights, darks, biases, &data.event_sender) {
         Ok(_) => HttpResponse::Ok().body("Plan completed successfully"),
         Err(e) => {
             eprintln!("Plan failed: {}", e);
+            let _ = data.event_sender.send(format!("Plan failed: {}", e));
             HttpResponse::InternalServerError().body(format!("Plan failed: {}", e))
         },
     }
@@ -154,25 +219,29 @@ async fn handle_planify(
 async fn main() -> std::io::Result<()> {
     println!("Initializing hardware...");
 
+    let (tx, _rx) = broadcast::channel(100);
+
     let camera = match CameraController::connect() {
         Ok(c) => {
             println!("Camera connected successfully.");
-            c
+            let _ = tx.send("Camera connected successfully.".to_string());
+            Some(c)
         },
         Err(e) => {
-            eprintln!("Failed to connect to camera: {}", e);
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
+            eprintln!("Failed to connect to camera: {}. Continuing without camera.", e);
+            None
         }
     };
     
     let indi_client = match init_eqmod_goto(LATITUDE, LONGITUDE, ELEVATION).await {
         Ok(c) => {
             println!("EQMod connected successfully.");
-            c
+            let _ = tx.send("EQMod connected successfully.".to_string());
+            Some(c)
         },
         Err(e) => {
-             eprintln!("Failed to connect to EQMod: {}", e);
-             return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+             eprintln!("Failed to connect to EQMod: {}. Continuing without EQMod.", e);
+             None
         }
     };
 
@@ -180,6 +249,7 @@ async fn main() -> std::io::Result<()> {
         indi_client: Mutex::new(indi_client),
         camera: Mutex::new(camera),
         goto_state: Mutex::new(GotoState::default()),
+        event_sender: tx,
     });
 
     println!("Starting server at http://0.0.0.0:8080");
@@ -193,6 +263,8 @@ async fn main() -> std::io::Result<()> {
             .service(receive_command)
             .service(handle_goto)
             .service(handle_planify)
+            .service(handle_disconnect)
+            .service(sse_events)
     })
     .bind(("0.0.0.0", 8080))?
     .run()
