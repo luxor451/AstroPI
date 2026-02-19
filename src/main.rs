@@ -15,7 +15,6 @@ use astro_pi_plate_solving::cr3_to_png;
 use camera_control::CameraController;
 use goto_closed_loop::{goto_closed_loop, init_eqmod_disconnect, init_eqmod_goto, GotoState};
 
-
 #[derive(Serialize, Deserialize, Clone)]
 struct Location {
     latitude: f64,
@@ -332,6 +331,9 @@ async fn handle_goto(payload: web::Json<GoToPayload>, data: web::Data<AppState>)
         payload.ra, payload.dec
     ));
 
+    // DEBUG: print to verify execution flow
+    println!("Processing GoTo request...");
+
     let mut client_opt = data.indi_client.lock().await;
     let client = match client_opt.as_mut() {
         Some(c) => c,
@@ -339,10 +341,11 @@ async fn handle_goto(payload: web::Json<GoToPayload>, data: web::Data<AppState>)
     };
 
     let camera_opt = data.camera.lock().await;
-    let camera = match camera_opt.as_ref() {
-        Some(c) => c,
-        None => return HttpResponse::InternalServerError().body("Camera not connected"),
-    };
+    // Modified to allow proceeding without camera (for open loop goto)
+    let camera = camera_opt.as_ref();
+    if camera.is_none() {
+        println!("Camera not connected. Proceeding without camera.");
+    }
 
     let parse_time = |s: &str| -> Option<(u8, u8, f64)> {
         let parts: Vec<&str> = s.trim().split(':').collect();
@@ -395,7 +398,7 @@ async fn handle_goto(payload: web::Json<GoToPayload>, data: web::Data<AppState>)
 
     match goto_closed_loop(
         &mut *client,
-        &camera,
+        camera,
         platesolve_settings,
         &mut *goto_state,
         target,
@@ -477,7 +480,7 @@ async fn handle_restart_indi(data: web::Data<AppState>) -> impl Responder {
     let _ = std::process::Command::new("pkill")
         .arg("indiserver")
         .output();
-    
+
     // Wait a moment for cleanup
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -496,25 +499,40 @@ async fn handle_restart_indi(data: web::Data<AppState>) -> impl Responder {
 
     // Attempt to drop the old client cleanly first if possible, though process is gone
     if let Some(client) = client_opt.take() {
-         // Maybe call disconnect but it will fail since server is gone. Just drop it.
-         drop(client);
+        // Maybe call disconnect but it will fail since server is gone. Just drop it.
+        drop(client);
     }
-    
+
     // Connect new client
-    match init_eqmod_goto(0.0, 0.0, 0.0, data.event_sender.clone()).await {
-        Ok(c) => {
-            println!("EQMod reconnected successfully.");
-            let _ = data.event_sender.send("EQMod reconnected successfully.".to_string());
-            *client_opt = Some(c);
-            HttpResponse::Ok().body("INDI server restarted and EQMod reconnected.")
-        }
-        Err(e) => {
-             eprintln!("Failed to reconnect to EQMod: {}", e);
-             let _ = data.event_sender.send(format!("Failed to reconnect to EQMod: {}", e));
-             // Don't fail the request, just report that connection failed but restart happened
-             HttpResponse::Ok().body(format!("INDI restarted but EQMod reconnect failed: {}", e))
+    // We try multiple times to connect because indiserver might take a while to be ready
+    let mut retry_count = 0;
+    while retry_count < 3 {
+        match init_eqmod_goto(0.0, 0.0, 0.0, data.event_sender.clone()).await {
+            Ok(c) => {
+                println!("EQMod reconnected successfully.");
+                let _ = data
+                    .event_sender
+                    .send("EQMod reconnected successfully.".to_string());
+                *client_opt = Some(c);
+                return HttpResponse::Ok().body("INDI server restarted and EQMod reconnected.");
+            }
+            Err(e) => {
+                eprintln!(
+                    "Failed to reconnect to EQMod (attempt {}): {}",
+                    retry_count + 1,
+                    e
+                );
+                retry_count += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
         }
     }
+
+    let _ = data
+        .event_sender
+        .send("Failed to reconnect to EQMod after multiple attempts.".to_string());
+    HttpResponse::InternalServerError()
+        .body("INDI restarted but EQMod reconnect failed after multiple attempts.")
 }
 
 #[derive(Serialize)]

@@ -42,13 +42,14 @@ pub async fn init_eqmod_goto(
 
 pub async fn goto_closed_loop(
     client: &mut IndiClient,
-    camera: &CameraController,
+    camera: Option<&CameraController>,
     setting: CaptureSettings,
     state: &mut GotoState,
     target_pos: CoordinateEquatorial,
     close_loop: bool,
     sender: &Sender<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    println!("DEBUG: Inside goto_closed_loop");
     // Set target coordinates
     let _ = sender.send("Starting Goto sequence...".to_string());
 
@@ -65,18 +66,29 @@ pub async fn goto_closed_loop(
     println!("{}", msg);
     let _ = sender.send(msg);
 
+    println!("DEBUG: calling client.goto...");
     client.goto(target_ra, target_dec).await?;
+    println!("DEBUG: client.goto returned.");
 
     if !close_loop {
         let _ = sender.send("Closed loop disabled, goto finished.".to_string());
         return Ok(());
     }
 
+    let camera = match camera {
+        Some(c) => c,
+        None => {
+            println!("Closed loop requested but no camera available.");
+            let _ = sender.send("Closed loop requested but no camera available.".to_string());
+            return Ok(());
+        }
+    };
+
     let _ = sender.send("Waiting for mount to settle...".to_string());
     tokio::time::sleep(std::time::Duration::from_secs(1)).await; // Wait for the mount to stop moving
 
     let _ = sender.send("Capturing and solving plate...".to_string());
-    let result_platesolve = capture_and_solve(&camera, &target_pos, &setting)?;
+    let result_platesolve = capture_and_solve(camera, &target_pos, &setting)?;
 
     let solved_coordinate = CoordinateEquatorial::from_radians(
         result_platesolve.solution.optical_axis_ra,
@@ -138,7 +150,7 @@ pub async fn goto_closed_loop(
         tokio::time::sleep(std::time::Duration::from_secs(1)).await; // Wait for the mount to stop moving
 
         let _ = sender.send("Capturing and solving again...".to_string());
-        let result_platesolve = capture_and_solve(&camera, &target_pos, &setting)?;
+        let result_platesolve = capture_and_solve(camera, &target_pos, &setting)?;
 
         let solved_coordinate = CoordinateEquatorial::from_radians(
             result_platesolve.solution.optical_axis_ra,
