@@ -17,6 +17,8 @@ pub enum IndiError {
     Communication(String),
     #[error("Device error: {0}")]
     Device(String),
+    #[error("Command failed: {0}")]
+    Command(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -45,6 +47,8 @@ pub struct IndiClient {
     state: Arc<RwLock<IndiState>>,
     device_name: String,
     sender: Option<tokio::sync::broadcast::Sender<String>>,
+    // We might need a way to signal errors to monitor_slew
+    latest_message: Arc<Mutex<String>>,
 }
 
 impl IndiClient {
@@ -62,11 +66,15 @@ impl IndiClient {
 
         let (reader, writer) = stream.into_split();
         let state = Arc::new(RwLock::new(IndiState::default()));
+        let latest_message = Arc::new(Mutex::new(String::new()));
         
         // Spawn the continuous reader loop
         let state_clone = state.clone();
+        let sender_clone = sender.clone();
+        let message_clone = latest_message.clone();
+
         tokio::spawn(async move {
-            Self::reader_loop(reader, state_clone).await;
+            Self::reader_loop(reader, state_clone, sender_clone, message_clone).await;
         });
 
         let client = IndiClient {
@@ -74,6 +82,7 @@ impl IndiClient {
             state,
             device_name: device_name.to_string(),
             sender,
+            latest_message,
         };
 
         // Send initial getProperties
@@ -92,7 +101,12 @@ impl IndiClient {
         self.set_time(&Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string()).await
     }
 
-    async fn reader_loop(mut reader: OwnedReadHalf, state: Arc<RwLock<IndiState>>) {
+    async fn reader_loop(
+        mut reader: OwnedReadHalf, 
+        state: Arc<RwLock<IndiState>>, 
+        sender: Option<tokio::sync::broadcast::Sender<String>>,
+        latest_message: Arc<Mutex<String>>
+    ) {
         let mut buffer = Vec::new();
         let mut temp_buf = [0u8; 4096];
 
@@ -106,7 +120,7 @@ impl IndiClient {
                     buffer.extend_from_slice(&temp_buf[..n]);
                     
                     while let Some((msg, bytes_consumed)) = Self::extract_one_xml_message(&buffer) {
-                        if let Err(_e) = Self::process_indi_message(&msg, &state).await {
+                        if let Err(_e) = Self::process_indi_message(&msg, &state, &sender, &latest_message).await {
                             // eprintln!("Error parsing INDI message: {}", e);
                         }
                         buffer.drain(0..bytes_consumed);
@@ -151,11 +165,41 @@ impl IndiClient {
         None
     }
 
-    async fn process_indi_message(xml_str: &str, state: &Arc<RwLock<IndiState>>) -> std::result::Result<(), String> {
+    async fn process_indi_message(
+        xml_str: &str, 
+        state: &Arc<RwLock<IndiState>>, 
+        sender: &Option<tokio::sync::broadcast::Sender<String>>,
+        latest_message: &Arc<Mutex<String>>
+    ) -> std::result::Result<(), String> {
         let doc = Document::parse(xml_str).map_err(|e| e.to_string())?;
         let root = doc.root_element();
         let tag_name = root.tag_name().name();
 
+        if tag_name == "message" {
+             let device = root.attribute("device").unwrap_or("unknown");
+             let message = root.attribute("message").unwrap_or("").to_string();
+             
+             if !message.is_empty() {
+                 let log_msg = format!("INDI Message [{}]: {}", device, message);
+                 println!("{}", log_msg);
+                 
+                 // Store latest message
+                 {
+                     let mut msg_lock = latest_message.lock().await;
+                     *msg_lock = message.clone();
+                 }
+
+                 if let Some(s) = sender {
+                     let _ = s.send(log_msg);
+                 }
+             }
+             return Ok(());
+        }
+
+        // Handle setNumber/Switch etc.
+        // We need to parse both "def" (definition) and "set" (update) vectors, maybe "new" too (client sent)
+        // Usually server sends "def...Vector" initially, and "set...Vector" for updates.
+        // Also "get...Vector" responses.
         if tag_name.ends_with("Vector") {
             let device = root.attribute("device").unwrap_or("unknown").to_string();
             let name = root.attribute("name").unwrap_or("unknown").to_string();
@@ -172,10 +216,19 @@ impl IndiClient {
                 }
             }
             
+            // Log coordinate updates for debugging
+            if name == "EQUATORIAL_EOD_COORD" {
+                 // println!("DEBUG: Received Coords Update: {:?} state={}", elements, prop_state);
+            }
+            
             // Critical: Only update if we have meaningful data or status change
             // Just overwrite for now
             let mut state_lock = state.write().await;
             let device_map = state_lock.devices.entry(device.clone()).or_default();
+            
+            // If the property already exists, merge elements because sometimes updates only contain changed elements? 
+            // Actually INDI standard says setVector contains all elements usually, but let's be safe.
+            // For now, full replace is fine as we construct `elements` fully from the XML.
             
             let property = IndiProperty {
                 name: name.clone(),
@@ -292,6 +345,9 @@ impl IndiClient {
             ("SYNC", false)
         ]).await?;
         self.send_numbers("EQUATORIAL_EOD_COORD", &[("RA", ra), ("DEC", dec)]).await?;
+        
+        println!("DEBUG: Sent Goto command. Starting monitor_slew...");
+        
         // Monitor slew
         self.monitor_slew(ra, dec).await?;
         
@@ -303,38 +359,59 @@ impl IndiClient {
         let start = Instant::now();
         let mut last_pos: (f64, f64) = (0.0, 0.0);
         
-        for _ in 0..60 {
-            sleep(Duration::from_millis(1000)).await;
-            
-            let state = self.state.read().await;
-            
+        println!("DEBUG: Waiting for slew start...");
+        // Wait a bit to ensure the mount has time to react to the command
+        sleep(Duration::from_millis(500)).await;
 
-            let (ra, dec) = if let Some(props) = state.devices.get(&self.device_name) {
-                if let Some(coord) = props.get("EQUATORIAL_EOD_COORD") {
-                    let r: f64 = coord.elements.get("RA").and_then(|v| v.parse().ok()).unwrap_or(last_pos.0);
-                    let d: f64 = coord.elements.get("DEC").and_then(|v| v.parse().ok()).unwrap_or(last_pos.1);
-                    (r, d)
-                } else { last_pos }
-            } else { last_pos };
-
-
-            let mut status = "UNKNOWN";
-            if let Some(props) = state.devices.get(&self.device_name) {
-                 if let Some(coord_prop) = props.get("EQUATORIAL_EOD_COORD") {
-                     if coord_prop.state == "Busy" {
-                         status = " SLEWING";
-                     } else if coord_prop.state == "Ok" {
-                         status = " TRACKING"; // Likely
-                     }
-                 }
+        loop {
+            // Check for error messages first
+            {
+                let mut msg_lock = self.latest_message.lock().await;
+                let msg = msg_lock.clone();
+                // "slewing to" and "outside limits" is a common error message format
+                // but checking generic "horizon" or "limit" keywords is safer
+                if msg.to_lowercase().contains("horizon") || msg.to_lowercase().contains("limit") {
+                     let err_msg = format!("Error: {}", msg);
+                     println!("{}", err_msg);
+                     if let Some(sender) = &self.sender {
+                         let _ = sender.send(err_msg.clone());
+                    }
+                    *msg_lock = String::new(); // Clear message
+                    return Err(IndiError::Command(msg));
+                }
             }
 
+            sleep(Duration::from_millis(1000)).await;
+            
+            let (ra, dec, state_str) = {
+                let state_lock = self.state.read().await;
+                if let Some(props) = state_lock.devices.get(&self.device_name) {
+                    let mut r = last_pos.0;
+                    let mut d = last_pos.1;
+                    let mut s = "UNKNOWN".to_string();
+
+                    if let Some(coord) = props.get("EQUATORIAL_EOD_COORD") {
+                         r = coord.elements.get("RA").and_then(|v| v.parse().ok()).unwrap_or(last_pos.0);
+                         d = coord.elements.get("DEC").and_then(|v| v.parse().ok()).unwrap_or(last_pos.1);
+                         
+                         if coord.state == "Busy" {
+                             s = " SLEWING".to_string();
+                         } else if coord.state == "Ok" {
+                             s = " TRACKING".to_string();
+                         }
+                    }
+                    (r, d, s)
+                } else {
+                    (last_pos.0, last_pos.1, "UNKNOWN".to_string())
+                }
+            };
+            
             let elapsed = start.elapsed().as_secs();
             let delta_ra = (ra - last_pos.0).abs();
             let delta_dec = (dec - last_pos.1).abs();
 
             let msg = format!("[{:2}s] {} Pointing to : - RA: {:.6}h, DEC: {:.6}° (ΔRA:{:.4}h, ΔDEC:{:.4}°)",
-                elapsed, status, ra, dec, delta_ra, delta_dec);
+                elapsed, state_str, ra, dec, delta_ra, delta_dec);
             
             println!("{}", msg);
             if let Some(sender) = &self.sender {
@@ -346,14 +423,22 @@ impl IndiClient {
             // Check if near target
             if (ra - target_ra).abs() < 0.01 && (dec - target_dec).abs() < 0.1 {
                 // Also check if state is no longer Busy
-                let is_busy = if let Some(props) = state.devices.get(&self.device_name) {
-                     props.get("EQUATORIAL_EOD_COORD").map(|p| p.state == "Busy").unwrap_or(false)
-                } else { false };
+                let is_busy = {
+                    let state_lock = self.state.read().await;
+                    if let Some(props) = state_lock.devices.get(&self.device_name) {
+                        props.get("EQUATORIAL_EOD_COORD").map(|p| p.state == "Busy").unwrap_or(false)
+                    } else { false }
+                };
                 
                 if !is_busy {
                     println!("\n Mount reached target position!");
                     break;
                 }
+            }
+            
+            // Timeout safety
+            if elapsed > 120 { 
+                return Err(IndiError::Command("Slew timed out".to_string()));
             }
         }
 
