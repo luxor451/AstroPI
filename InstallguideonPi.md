@@ -57,3 +57,7 @@ cargo build --release
 # Lauch indiserver:
 
 indiserver indi_eqmod_telescope
+
+
+sudo systemctl restart astropi.service
+sudo systemctl status astropi.service
