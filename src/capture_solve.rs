@@ -184,9 +184,11 @@ pub async fn run_sequence(
     sequence: &[SequenceItem],
     target: &str,
     date_str: &str,
+    subfolder: Option<String>,
     resume_from_idx: u32,
     sender: &Sender<String>,
     is_running: &Arc<AtomicBool>,
+    should_pause: &Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting sequence (resuming from {})...", resume_from_idx);
     let _ = sender.send(format!("Starting sequence (resuming from {})...", resume_from_idx));
@@ -206,6 +208,14 @@ pub async fn run_sequence(
              return Ok(());
         }
 
+        // Check if paused (before starting new item type)
+        if should_pause.load(Ordering::Relaxed) {
+             let msg = "Plan paused manually.".to_string();
+             println!("{}", msg);
+             let _ = sender.send(msg);
+             return Ok(());
+        }
+
         let type_name = match item.item_type {
             SequenceType::Light => "lights",
             SequenceType::Dark => "darks",
@@ -213,7 +223,12 @@ pub async fn run_sequence(
             SequenceType::Flat => "flats",
         };
 
-        let current_save_dir = settings.save_directory.join(type_name);
+        let current_save_dir = if let Some(ref sub) = subfolder {
+            settings.save_directory.join(sub).join(type_name)
+        } else {
+            settings.save_directory.join(type_name)
+        };
+
         std::fs::create_dir_all(&current_save_dir)?;
 
         let exposure = if matches!(item.item_type, SequenceType::Bias) {
@@ -236,6 +251,14 @@ pub async fn run_sequence(
                 return Ok(());
             }
 
+            // Check pause before starting capture
+            if should_pause.load(Ordering::Relaxed) {
+                let msg = "Sequence paused manually.".to_string();
+                println!("{}", msg);
+                let _ = sender.send(msg);
+                return Ok(());
+            }
+
             let msg = format!("PROGRESS:{}/{}:Capturing {} frame {}/{} ({}s)...", current_global_idx, total_count, type_name, i + 1, item.count, exposure);
             println!("{}", msg);
             let _ = sender.send(msg);
@@ -248,6 +271,21 @@ pub async fn run_sequence(
                 &current_save_dir,
                 Some(is_running),
             ).await?;
+
+            // Check if cancelled during exposure
+            if !is_running.load(Ordering::Relaxed) {
+                let msg = "Sequence cancelled manually. Deleting last image.".to_string();
+                println!("{}", msg);
+                let _ = sender.send(msg);
+                if path.exists() {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        eprintln!("Failed to delete cancelled image {}: {}", path.display(), e);
+                    } else {
+                        println!("Deleted cancelled image: {}", path.display());
+                    }
+                }
+                return Ok(());
+            }
 
             // Rename file to include target and date
             if let Some(ext) = path.extension() {
@@ -265,6 +303,14 @@ pub async fn run_sequence(
             let msg_done = format!("Captured frame {}/{}", current_global_idx, total_count);
             println!("{}", msg_done);
             let _ = sender.send(msg_done);
+
+            // Check pause AFTER capture (so we can pause between frames)
+            if should_pause.load(Ordering::Relaxed) {
+                let msg = "Sequence paused manually.".to_string();
+                println!("{}", msg);
+                let _ = sender.send(msg);
+                return Ok(());
+            }
         }
     }
 

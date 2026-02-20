@@ -45,6 +45,7 @@ struct AppState {
     location: Mutex<Location>,
     indi_server_process: Mutex<Option<std::process::Child>>,
     camera_settings: Mutex<CameraGlobalSettings>,
+    should_pause: Arc<AtomicBool>,
 }
 
 #[derive(Deserialize)]
@@ -59,6 +60,7 @@ struct StartSequencePayload {
     target: String,
     date: String,
     resume_from: Option<u32>,
+    subfolder: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -258,6 +260,14 @@ async fn handle_stop(data: web::Data<AppState>) -> impl Responder {
     let _ = data.event_sender.send("Received Stop request".to_string());
     data.is_running.store(false, Ordering::Relaxed);
     HttpResponse::Ok().body("Stop signal sent")
+}
+
+#[post("/pause")]
+async fn handle_pause(data: web::Data<AppState>) -> impl Responder {
+    println!("Received Pause request");
+    let _ = data.event_sender.send("Received Pause request".to_string());
+    data.should_pause.store(true, Ordering::Relaxed);
+    HttpResponse::Ok().body("Pause signal sent")
 }
 
 #[get("/events")]
@@ -493,6 +503,7 @@ async fn handle_start_sequence(
 
     // Set running state to true before starting
     data.is_running.store(true, Ordering::Relaxed);
+    data.should_pause.store(false, Ordering::Relaxed);
 
     match run_sequence(
         &*camera,
@@ -500,9 +511,11 @@ async fn handle_start_sequence(
         &payload.sequence,
         &payload.target,
         &payload.date,
+        payload.subfolder.clone(),
         payload.resume_from.unwrap_or(0),
         &data.event_sender,
         &data.is_running,
+        &data.should_pause,
     ).await {
         Ok(_) => HttpResponse::Ok().body("Plan completed successfully"),
         Err(e) => {
@@ -756,6 +769,7 @@ async fn main() -> std::io::Result<()> {
         }),
         indi_server_process: Mutex::new(Some(indi_process)),
         camera_settings: Mutex::new(CameraGlobalSettings::default()),
+        should_pause: Arc::new(AtomicBool::new(false)),
     });
 
     println!("Starting server at http://0.0.0.0:8080");
@@ -771,6 +785,7 @@ async fn main() -> std::io::Result<()> {
             .service(handle_update_camera_settings)
             .service(handle_start_sequence)
             .service(handle_stop)
+            .service(handle_pause)
             .service(handle_disconnect)
             .service(handle_connect_camera)
             .service(handle_abort)
