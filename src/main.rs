@@ -29,6 +29,7 @@ struct AppState {
     event_sender: broadcast::Sender<String>,
     is_running: Arc<AtomicBool>,
     location: Mutex<Location>,
+    indi_server_process: Mutex<Option<std::process::Child>>,
 }
 
 #[derive(Deserialize)]
@@ -476,20 +477,43 @@ async fn handle_planify(
 #[post("/restart_indi")]
 async fn handle_restart_indi(data: web::Data<AppState>) -> impl Responder {
     println!("Received Restart INDI request");
-    // Kill existing indiserver process by name
-    let _ = std::process::Command::new("pkill")
-        .arg("indiserver")
-        .output();
+    
+    let mut process_guard = data.indi_server_process.lock().await;
+
+    if let Some(mut child) = process_guard.take() {
+        println!("Killing existing INDI server process...");
+        if let Err(e) = child.kill() {
+            eprintln!("Failed to kill process: {}", e);
+        }
+        let _ = child.wait();
+    } else {
+        // Fallback if no child stored
+        let _ = std::process::Command::new("pkill")
+            .arg("indiserver")
+            .output();
+    }
 
     // Wait a moment for cleanup
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     // Start new indiserver
     println!("Starting new INDI server...");
-    let _ = std::process::Command::new("indiserver")
+    match std::process::Command::new("indiserver")
         .arg("indi_eqmod_telescope")
         .spawn()
-        .expect("Failed to start INDI server");
+    {
+        Ok(child) => {
+            *process_guard = Some(child);
+        }
+        Err(e) => {
+            eprintln!("Failed to start INDI server: {}", e);
+            return HttpResponse::InternalServerError()
+                .body(format!("Failed to start INDI server: {}", e));
+        }
+    }
+
+    // Drop the lock so other parts can use it if they ever needed (though currently only this handler uses it)
+    drop(process_guard);
 
     // Wait for it to start
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -561,7 +585,7 @@ async fn handle_status(data: web::Data<AppState>) -> impl Responder {
 async fn main() -> std::io::Result<()> {
     println!("Starting INDI server...");
     // Start INDI server as a child process
-    let _ = std::process::Command::new("indiserver")
+    let indi_process = std::process::Command::new("indiserver")
         .arg("indi_eqmod_telescope")
         .spawn()
         .expect("Failed to start INDI server");
@@ -614,6 +638,7 @@ async fn main() -> std::io::Result<()> {
             longitude: 0.0,
             elevation: 0.0,
         }),
+        indi_server_process: Mutex::new(Some(indi_process)),
     });
 
     println!("Starting server at http://0.0.0.0:8080");
