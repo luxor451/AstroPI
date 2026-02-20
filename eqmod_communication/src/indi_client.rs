@@ -291,6 +291,20 @@ impl IndiClient {
     }
     
 
+    /// Park the telescope
+    pub async fn park(&self) -> Result<()> {
+        println!("DEBUG: Parking telescope...");
+        // Ensure explicit switches for OneOfMany property
+        self.send_switch("TELESCOPE_PARK", &[("PARK", true), ("UNPARK", false)]).await
+    }
+
+    /// Unpark the telescope
+    pub async fn unpark(&self) -> Result<()> {
+        println!("DEBUG: Unparking telescope...");
+        // Ensure explicit switches for OneOfMany property
+        self.send_switch("TELESCOPE_PARK", &[("PARK", false), ("UNPARK", true)]).await
+    }
+
     /// Set geographic location for the mount
     ///
     /// # Arguments
@@ -338,6 +352,11 @@ impl IndiClient {
         assert!(ra >= 0.0 && ra <= 24.0, "RA must be between 0 and 24 hours");
         assert!(dec >= -90.0 && dec <= 90.0, "DEC must be between -90 and +90 degrees");
 
+        // Ensure mount is unparked before goto
+        self.unpark().await?;
+
+        // Give it a moment to process unpark if needed
+        sleep(Duration::from_millis(500)).await;
 
         self.send_switch("TELESCOPE_TRACK_STATE", &[("TRACK_ON", true), ("TRACK_OFF", false)]).await?;
         self.send_switch("ON_COORD_SET", &[

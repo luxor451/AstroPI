@@ -510,6 +510,50 @@ async fn handle_abort(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().body("Abort signal sent")
 }
 
+#[post("/park")]
+async fn handle_park(data: web::Data<AppState>) -> impl Responder {
+    println!("Received Park request");
+    let _ = data.event_sender.send("Received Park request".to_string());
+
+    let client_opt = data.indi_client.read().await;
+    if let Some(client) = client_opt.as_ref() {
+        if let Err(e) = client.park().await {
+            eprintln!("Failed to park: {}", e);
+            let _ = data.event_sender.send(format!("Failed to park: {}", e));
+            return HttpResponse::InternalServerError().body(format!("Failed to park: {}", e));
+        } else {
+            println!("Park command sent.");
+            let _ = data.event_sender.send("Park command sent.".to_string());
+        }
+    } else {
+        return HttpResponse::InternalServerError().body("EQMod not connected");
+    }
+
+    HttpResponse::Ok().body("Park signal sent")
+}
+
+#[post("/unpark")]
+async fn handle_unpark(data: web::Data<AppState>) -> impl Responder {
+    println!("Received Unpark request");
+    let _ = data.event_sender.send("Received Unpark request".to_string());
+
+    let client_opt = data.indi_client.read().await;
+    if let Some(client) = client_opt.as_ref() {
+        if let Err(e) = client.unpark().await {
+            eprintln!("Failed to unpark: {}", e);
+            let _ = data.event_sender.send(format!("Failed to unpark: {}", e));
+            return HttpResponse::InternalServerError().body(format!("Failed to unpark: {}", e));
+        } else {
+            println!("Unpark command sent.");
+            let _ = data.event_sender.send("Unpark command sent.".to_string());
+        }
+    } else {
+        return HttpResponse::InternalServerError().body("EQMod not connected");
+    }
+
+    HttpResponse::Ok().body("Unpark signal sent")
+}
+
 #[post("/restart_indi")]
 async fn handle_restart_indi(data: web::Data<AppState>) -> impl Responder {
     println!("Received Restart INDI request");
@@ -700,6 +744,8 @@ async fn main() -> std::io::Result<()> {
             .service(handle_disconnect)
             .service(handle_connect_camera)
             .service(handle_abort)
+            .service(handle_park)
+            .service(handle_unpark)
             .service(sse_events)
             .service(handle_status)
             .service(take_preview)
