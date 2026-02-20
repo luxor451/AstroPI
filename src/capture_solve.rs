@@ -8,11 +8,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::broadcast::Sender;
+// Removed chrono import plan as discussed, using string injection from payload
 
 use astro_pi_plate_solving::{
     solve_plate, Arcdegrees, CoordinateEquatorial, PlateSolvingResult, RaHoursMinutesSeconds,
 };
 use camera_control::CameraController;
+use serde::Deserialize;
+
+#[derive(Clone, Debug, Deserialize)]
+pub enum SequenceType {
+    Light,
+    Dark,
+    Bias,
+    Flat,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SequenceItem {
+    #[serde(rename = "type")]
+    pub item_type: SequenceType,
+    pub exposure: f64,
+    pub count: u32,
+}
 
 #[allow(dead_code)]
 /// Result of a capture and solve operation
@@ -77,7 +95,7 @@ impl Default for CaptureSettings {
 /// let result = capture_and_solve(&camera, &initial_guess, &settings).unwrap();
 /// println!("Actual position: RA={}, Dec={}", result.solution.optical_axis_ra, result.solution.optical_axis_dec);
 /// ```
-pub fn capture_and_solve(
+pub async fn capture_and_solve(
     camera: &CameraController,
     initial_guess: &CoordinateEquatorial,
     settings: &CaptureSettings,
@@ -97,7 +115,8 @@ pub fn capture_and_solve(
         settings.aperture,
         settings.exposure_seconds,
         &settings.save_directory,
-    )?;
+        None, // No cancellation for single plate solve capture yet (or could pass one)
+    ).await?;
     let capture_time = capture_start.elapsed();
 
     println!("Image captured: {}", image_path.display());
@@ -137,11 +156,11 @@ pub fn capture_and_solve(
 }
 #[allow(dead_code)]
 /// Capture and solve with default settings
-pub fn capture_and_solve_quick(
+pub async fn capture_and_solve_quick(
     camera: &CameraController,
     initial_guess: &CoordinateEquatorial,
 ) -> Result<CaptureAndSolveResult, Box<dyn std::error::Error>> {
-    capture_and_solve(camera, initial_guess, &CaptureSettings::default())
+    capture_and_solve(camera, initial_guess, &CaptureSettings::default()).await
 }
 
 /// Create initial guess from RA (hours, minutes, seconds) and Dec (degrees, arcmin, arcsec)
@@ -159,143 +178,100 @@ pub fn make_initial_guess(
     )
 }
 
-fn take_lights(
+pub async fn run_sequence(
     camera: &CameraController,
-    settings: &CaptureSettings,
-    count: u32,
-    sender: &Sender<String>,
-    is_running: &Arc<AtomicBool>,
-) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
-    let lights_dir = settings.save_directory.join("lights");
-    std::fs::create_dir_all(&lights_dir)?;
-    let mut paths = Vec::new();
-    for i in 0..count {
-        if !is_running.load(Ordering::Relaxed) {
-            let msg = "Plan cancelled manually.".to_string();
-            println!("{}", msg);
-            let _ = sender.send(msg);
-            return Ok(paths);
-        }
-        let msg = format!("Capturing light frame {}/{}...", i + 1, count);
-        println!("{}", msg);
-        let _ = sender.send(msg);
-
-        let path = camera.take_photo(
-            settings.iso,
-            settings.aperture,
-            settings.exposure_seconds,
-            &lights_dir,
-        )?;
-        let msg_done = format!("Captured: {}", path.display());
-        println!("{}", msg_done);
-        let _ = sender.send(msg_done);
-        paths.push(path);
-    }
-    Ok(paths)
-}
-
-fn take_darks(
-    camera: &CameraController,
-    settings: &CaptureSettings,
-    count: u32,
-    sender: &Sender<String>,
-    is_running: &Arc<AtomicBool>,
-) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
-    let dark_dir = settings.save_directory.join("darks");
-    std::fs::create_dir_all(&dark_dir)?;
-    let mut paths = Vec::new();
-    for i in 0..count {
-        if !is_running.load(Ordering::Relaxed) {
-            let msg = "Plan cancelled manually.".to_string();
-            println!("{}", msg);
-            let _ = sender.send(msg);
-            return Ok(paths);
-        }
-        let msg = format!("Capturing dark frame {}/{}...", i + 1, count);
-        println!("{}", msg);
-        let _ = sender.send(msg);
-
-        let path = camera.take_photo(
-            settings.iso,
-            settings.aperture,
-            settings.exposure_seconds,
-            &dark_dir,
-        )?;
-
-        let msg_done = format!("Captured: {}", path.display());
-        println!("{}", msg_done);
-        let _ = sender.send(msg_done);
-        paths.push(path);
-    }
-    Ok(paths)
-}
-
-fn take_biases(
-    camera: &CameraController,
-    settings: &CaptureSettings,
-    count: u32,
-    sender: &Sender<String>,
-    is_running: &Arc<AtomicBool>,
-) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
-    let bias_dir = settings.save_directory.join("biases");
-    std::fs::create_dir_all(&bias_dir)?;
-    let mut paths = Vec::new();
-    for i in 0..count {
-        if !is_running.load(Ordering::Relaxed) {
-            let msg = "Plan cancelled manually.".to_string();
-            println!("{}", msg);
-            let _ = sender.send(msg);
-            return Ok(paths);
-        }
-        let msg = format!("Capturing bias frame {}/{}...", i + 1, count);
-        println!("{}", msg);
-        let _ = sender.send(msg);
-
-        let path = camera.take_photo(
-            settings.iso,
-            settings.aperture,
-            0, // Bias frames have zero exposure time
-            &bias_dir,
-        )?;
-
-        let msg_done = format!("Captured: {}", path.display());
-        println!("{}", msg_done);
-        let _ = sender.send(msg_done);
-        paths.push(path);
-    }
-    Ok(paths)
-}
-
-pub fn planify_shoot(
-    camera: &CameraController,
-    settings: &CaptureSettings,
-    nb_lights: u32,
-    nb_darks: u32,
-    nb_biases: u32,
+    settings: &CaptureSettings, // Base settings (ISO, Save dir root)
+    sequence: &[SequenceItem],
+    target: &str,
+    date_str: &str,
+    resume_from_idx: u32,
     sender: &Sender<String>,
     is_running: &Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting planified shoot...");
-    let _ = sender.send("Starting planified shoot...".to_string());
+    println!("Starting sequence (resuming from {})...", resume_from_idx);
+    let _ = sender.send(format!("Starting sequence (resuming from {})...", resume_from_idx));
 
-    let light_paths = take_lights(camera, settings, nb_lights, sender, is_running)?;
-    if !is_running.load(Ordering::Relaxed) {
-        return Ok(());
+    let mut total_count: u32 = 0;
+    for item in sequence {
+        total_count += item.count;
     }
-    let dark_paths = take_darks(camera, settings, nb_darks, sender, is_running)?;
-    if !is_running.load(Ordering::Relaxed) {
-        return Ok(());
+    let mut current_global_idx = 0;
+
+    for item in sequence {
+        // Check if stopped
+        if !is_running.load(Ordering::Relaxed) {
+             let msg = "Plan cancelled manually.".to_string();
+             println!("{}", msg);
+             let _ = sender.send(msg);
+             return Ok(());
+        }
+
+        let type_name = match item.item_type {
+            SequenceType::Light => "lights",
+            SequenceType::Dark => "darks",
+            SequenceType::Bias => "biases",
+            SequenceType::Flat => "flats",
+        };
+
+        let current_save_dir = settings.save_directory.join(type_name);
+        std::fs::create_dir_all(&current_save_dir)?;
+
+        let exposure = if matches!(item.item_type, SequenceType::Bias) {
+            0 // minimal exposure supported by camera lib for bias
+        } else {
+            item.exposure as u64
+        };
+        
+        for i in 0..item.count {
+            current_global_idx += 1;
+
+            if current_global_idx <= resume_from_idx {
+                continue;
+            }
+
+             if !is_running.load(Ordering::Relaxed) {
+                let msg = "Sequence cancelled manually.".to_string();
+                println!("{}", msg);
+                let _ = sender.send(msg);
+                return Ok(());
+            }
+
+            let msg = format!("PROGRESS:{}/{}:Capturing {} frame {}/{} ({}s)...", current_global_idx, total_count, type_name, i + 1, item.count, exposure);
+            println!("{}", msg);
+            let _ = sender.send(msg);
+            
+            // Note: Aperture is passed as None to keep current or can be wired up if needed
+            let path = camera.take_photo(
+                settings.iso,
+                settings.aperture,
+                exposure,
+                &current_save_dir,
+                Some(is_running),
+            ).await?;
+
+            // Rename file to include target and date
+            if let Some(ext) = path.extension() {
+                let ext_str = ext.to_string_lossy();
+                let new_filename = format!("{}_{}_{:04}.{}", target, date_str, current_global_idx, ext_str);
+                let new_path = current_save_dir.join(&new_filename);
+                if let Err(e) = std::fs::rename(&path, &new_path) {
+                    eprintln!("Failed to rename file: {}", e);
+                    let _ = sender.send(format!("Warning: Failed to rename file: {}", e));
+                } else {
+                    println!("Saved to {}", new_path.display());
+                }
+            }
+            
+            let msg_done = format!("Captured frame {}/{}", current_global_idx, total_count);
+            println!("{}", msg_done);
+            let _ = sender.send(msg_done);
+        }
     }
-    let bias_paths = take_biases(camera, settings, nb_biases, sender, is_running)?;
-    if !is_running.load(Ordering::Relaxed) {
-        return Ok(());
-    }
+
 
     let msg = format!(
-        "Planified shoot complete! Captured {} lights, {} darks, {} biases.",
-        light_paths.len(),
-        dark_paths.len(),
-        bias_paths.len()
+        "Sequence complete! Captured {} frames total.",
+        total_count
     );
     println!("{}", msg);
     let _ = sender.send(msg);

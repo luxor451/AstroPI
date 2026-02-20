@@ -92,7 +92,7 @@ pub async fn goto_closed_loop(
     }
 
     let _ = sender.send("Capturing and solving plate...".to_string());
-    let result_platesolve = capture_and_solve(camera, &target_pos, &setting)?;
+    let result_platesolve = capture_and_solve(camera, &target_pos, &setting).await?;
 
     let solved_coordinate = CoordinateEquatorial::from_radians(
         result_platesolve.solution.optical_axis_ra,
@@ -145,7 +145,7 @@ pub async fn goto_closed_loop(
         }
 
         let _ = sender.send("Capturing and solving again...".to_string());
-        let result_platesolve = capture_and_solve(camera, &target_pos, &setting)?;
+        let result_platesolve = capture_and_solve(camera, &target_pos, &setting).await?;
 
         let solved_coordinate = CoordinateEquatorial::from_radians(
             result_platesolve.solution.optical_axis_ra,

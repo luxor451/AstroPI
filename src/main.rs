@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::capture_solve::{make_initial_guess, planify_shoot, CaptureSettings};
+use crate::capture_solve::{make_initial_guess, CaptureSettings, run_sequence, SequenceItem};
 use astro_pi_plate_solving::cr3_to_png;
 use camera_control::CameraController;
 use goto_closed_loop::{goto_closed_loop, init_eqmod_disconnect, init_eqmod_goto};
@@ -22,6 +22,21 @@ struct Location {
     elevation: f64,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct CameraGlobalSettings {
+    pub iso: u64,
+    pub platesolving_exposure: f64,
+}
+
+impl Default for CameraGlobalSettings {
+    fn default() -> Self {
+        Self {
+            iso: 800,
+            platesolving_exposure: 2.0,
+        }
+    }
+}
+
 struct AppState {
     indi_client: RwLock<Option<eqmod_communication::IndiClient>>,
     camera: Mutex<Option<CameraController>>,
@@ -29,6 +44,7 @@ struct AppState {
     is_running: Arc<AtomicBool>,
     location: Mutex<Location>,
     indi_server_process: Mutex<Option<std::process::Child>>,
+    camera_settings: Mutex<CameraGlobalSettings>,
 }
 
 #[derive(Deserialize)]
@@ -38,13 +54,11 @@ struct GoToPayload {
 }
 
 #[derive(Deserialize)]
-struct PlanifyPayload {
-    lights: String,
-    darks: String,
-    biases: String,
-    iso: String,
-    exposure: String,
-    aperture: String,
+struct StartSequencePayload {
+    sequence: Vec<SequenceItem>,
+    target: String,
+    date: String,
+    resume_from: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -52,6 +66,12 @@ struct LocationPayload {
     latitude: f64,
     longitude: f64,
     elevation: f64,
+}
+
+#[derive(Deserialize)]
+struct CameraSettingsPayload {
+    iso: String,
+    platesolvingExposure: String,
 }
 
 #[get("/location")]
@@ -181,7 +201,7 @@ async fn take_preview(
         }
     }
 
-    match camera.take_photo(iso, aperture, exposure_seconds, &preview_dir) {
+    match camera.take_photo(iso, aperture, exposure_seconds, &preview_dir, None).await {
         Ok(path) => {
             let jpg_path = path.with_extension("jpg");
             let result_response = if let Err(e) = cr3_to_png(&path, &jpg_path) {
@@ -274,7 +294,7 @@ async fn handle_connect_camera(data: web::Data<AppState>) -> impl Responder {
         return HttpResponse::Ok().body("Camera already connected");
     }
 
-    match CameraController::connect() {
+    match CameraController::connect().await {
         Ok(c) => {
             *camera_opt = Some(c);
             println!("Camera connected successfully.");
@@ -389,19 +409,18 @@ async fn handle_goto(payload: web::Json<GoToPayload>, data: web::Data<AppState>)
         None => return HttpResponse::BadRequest().body("Invalid DEC format. Expected DD:MM:SS"),
     };
 
-    // Cast ra parts to i64 as required by make_initial_guess
-    let target = make_initial_guess(ra.0 as i64, ra.1 as i64, ra.2, dec.0, dec.1, dec.2);
-
-    // TODO : add real capture settings for platesolve instead of hardcoded ones
+    // Get current settings
+    let settings = data.camera_settings.lock().await;
 
     let platesolve_settings = CaptureSettings {
-        iso: 3200,
+        iso: settings.iso,
         aperture: None,
-        exposure_seconds: 10,
+        exposure_seconds: settings.platesolving_exposure as u64,
         save_directory: PathBuf::from("imgs/goto/captures"),
     };
 
-    // TODO : add true instead of false for closed loop after testing
+    // Cast ra parts to i64 as required by make_initial_guess
+    let target = make_initial_guess(ra.0 as i64, ra.1 as i64, ra.2, dec.0, dec.1, dec.2);
 
     let result = goto_closed_loop(
         &client,
@@ -428,15 +447,31 @@ async fn handle_goto(payload: web::Json<GoToPayload>, data: web::Data<AppState>)
     }
 }
 
-#[post("/planify")]
-async fn handle_planify(
-    payload: web::Json<PlanifyPayload>,
+#[post("/update_camera_settings")]
+async fn handle_update_camera_settings(
+    payload: web::Json<CameraSettingsPayload>,
     data: web::Data<AppState>,
 ) -> impl Responder {
-    println!("Received Planify request");
+    let mut settings = data.camera_settings.lock().await;
+
+    settings.iso = payload.iso.parse().unwrap_or(800);
+    settings.platesolving_exposure = payload.platesolvingExposure.parse().unwrap_or(2.0);
+
+    println!("Updated settings: ISO={}, Plate Expose={}", settings.iso, settings.platesolving_exposure);
+    let _ = data.event_sender.send(format!("Camera settings updated: ISO={}, Plate Expose={}", settings.iso, settings.platesolving_exposure));
+
+    HttpResponse::Ok().body("Settings updated successfully")
+}
+
+#[post("/start_sequence")]
+async fn handle_start_sequence(
+    payload: web::Json<StartSequencePayload>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    println!("Received Start Sequence request");
     let _ = data
         .event_sender
-        .send("Received Planify request".to_string());
+        .send("Received Start Sequence request".to_string());
 
     let camera_opt = data.camera.lock().await;
     let camera = match camera_opt.as_ref() {
@@ -444,38 +479,31 @@ async fn handle_planify(
         None => return HttpResponse::InternalServerError().body("Camera not connected"),
     };
 
-    let lights = payload.lights.parse::<u32>().unwrap_or(0);
-    let darks = payload.darks.parse::<u32>().unwrap_or(0);
-    let biases = payload.biases.parse::<u32>().unwrap_or(0);
-    let iso = payload.iso.parse::<u64>().unwrap_or(1600);
-    let exposure = payload.exposure.parse::<u64>().unwrap_or(5);
-
-    let aperture_str = payload.aperture.trim().replace("f/", "");
-    let aperture = if aperture_str.is_empty() {
-        None
-    } else {
-        aperture_str.parse::<f64>().ok()
-    };
+    let settings_guard = data.camera_settings.lock().await;
 
     let capture_settings = CaptureSettings {
-        iso,
-        aperture,
-        exposure_seconds: exposure,
+        iso: settings_guard.iso,
+        aperture: None, // Aperture control not fully exposed in frontend yet
+        exposure_seconds: 0, // Not used as global default anymore, sequence items define their own
         save_directory: PathBuf::from("imgs/astro_captures"),
     };
+
+    // Drop guard so we don't hold lock during sequence
+    drop(settings_guard);
 
     // Set running state to true before starting
     data.is_running.store(true, Ordering::Relaxed);
 
-    match planify_shoot(
+    match run_sequence(
         &*camera,
         &capture_settings,
-        lights,
-        darks,
-        biases,
+        &payload.sequence,
+        &payload.target,
+        &payload.date,
+        payload.resume_from.unwrap_or(0),
         &data.event_sender,
         &data.is_running,
-    ) {
+    ).await {
         Ok(_) => HttpResponse::Ok().body("Plan completed successfully"),
         Err(e) => {
             eprintln!("Plan failed: {}", e);
@@ -686,7 +714,7 @@ async fn main() -> std::io::Result<()> {
 
     let (tx, _rx) = broadcast::channel(100);
 
-    let camera = match CameraController::connect() {
+    let camera = match CameraController::connect().await {
         Ok(c) => {
             println!("Camera connected successfully.");
             let _ = tx.send("Camera connected successfully.".to_string());
@@ -727,6 +755,7 @@ async fn main() -> std::io::Result<()> {
             elevation: 0.0,
         }),
         indi_server_process: Mutex::new(Some(indi_process)),
+        camera_settings: Mutex::new(CameraGlobalSettings::default()),
     });
 
     println!("Starting server at http://0.0.0.0:8080");
@@ -739,7 +768,8 @@ async fn main() -> std::io::Result<()> {
             .app_data(state.clone())
             .service(receive_command)
             .service(handle_goto)
-            .service(handle_planify)
+            .service(handle_update_camera_settings)
+            .service(handle_start_sequence)
             .service(handle_stop)
             .service(handle_disconnect)
             .service(handle_connect_camera)

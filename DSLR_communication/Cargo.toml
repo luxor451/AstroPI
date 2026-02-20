@@ -14,3 +14,4 @@ path = "src/main.rs"
 
 [dependencies]
 gphoto2 = "3.4"
+tokio = { version = "1.0", features = ["rt", "time", "macros"] }
