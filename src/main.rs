@@ -13,7 +13,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::capture_solve::{make_initial_guess, planify_shoot, CaptureSettings};
 use astro_pi_plate_solving::cr3_to_png;
 use camera_control::CameraController;
-use goto_closed_loop::{goto_closed_loop, init_eqmod_disconnect, init_eqmod_goto, GotoState};
+use goto_closed_loop::{goto_closed_loop, init_eqmod_disconnect, init_eqmod_goto};
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Location {
@@ -25,7 +25,6 @@ struct Location {
 struct AppState {
     indi_client: Mutex<Option<eqmod_communication::IndiClient>>,
     camera: Mutex<Option<CameraController>>,
-    goto_state: Mutex<GotoState>,
     event_sender: broadcast::Sender<String>,
     is_running: Arc<AtomicBool>,
     location: Mutex<Location>,
@@ -393,15 +392,12 @@ async fn handle_goto(payload: web::Json<GoToPayload>, data: web::Data<AppState>)
         save_directory: PathBuf::from("imgs/goto/captures"),
     };
 
-    let mut goto_state = data.goto_state.lock().await;
-
     // TODO : add true instead of false for closed loop after testing
 
     match goto_closed_loop(
         &mut *client,
         camera,
         platesolve_settings,
-        &mut *goto_state,
         target,
         false,
         &data.event_sender,
@@ -477,13 +473,16 @@ async fn handle_planify(
 #[post("/restart_indi")]
 async fn handle_restart_indi(data: web::Data<AppState>) -> impl Responder {
     println!("Received Restart INDI request");
+    let _ = data.event_sender.send("Received Restart INDI request".to_string());
     
     let mut process_guard = data.indi_server_process.lock().await;
 
     if let Some(mut child) = process_guard.take() {
         println!("Killing existing INDI server process...");
+        let _ = data.event_sender.send("Killing existing INDI server process...".to_string());
         if let Err(e) = child.kill() {
             eprintln!("Failed to kill process: {}", e);
+            let _ = data.event_sender.send(format!("Failed to kill process: {}", e));
         }
         let _ = child.wait();
     } else {
@@ -491,6 +490,7 @@ async fn handle_restart_indi(data: web::Data<AppState>) -> impl Responder {
         let _ = std::process::Command::new("pkill")
             .arg("indiserver")
             .output();
+        let _ = data.event_sender.send("Sent pkill indiserver command as fallback".to_string());
     }
 
     // Wait a moment for cleanup
@@ -498,15 +498,19 @@ async fn handle_restart_indi(data: web::Data<AppState>) -> impl Responder {
 
     // Start new indiserver
     println!("Starting new INDI server...");
+    let _ = data.event_sender.send("Starting new INDI server...".to_string());
     match std::process::Command::new("indiserver")
         .arg("indi_eqmod_telescope")
         .spawn()
     {
         Ok(child) => {
             *process_guard = Some(child);
+            println!("INDI server started with PID: {}", child.id());
+            let _ = data.event_sender.send(format!("INDI server started with PID: {}", child.id()));
         }
         Err(e) => {
             eprintln!("Failed to start INDI server: {}", e);
+            let _ = data.event_sender.send(format!("Failed to start INDI server: {}", e));
             return HttpResponse::InternalServerError()
                 .body(format!("Failed to start INDI server: {}", e));
         }
@@ -516,9 +520,11 @@ async fn handle_restart_indi(data: web::Data<AppState>) -> impl Responder {
     drop(process_guard);
 
     // Wait for it to start
+    let _ = data.event_sender.send("Waiting 2s for INDI server initialization...".to_string());
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     // Reconnect EQMod client
+    let _ = data.event_sender.send("Reconnecting EQMod client...".to_string());
     let mut client_opt = data.indi_client.lock().await;
 
     // Attempt to drop the old client cleanly first if possible, though process is gone
@@ -541,11 +547,9 @@ async fn handle_restart_indi(data: web::Data<AppState>) -> impl Responder {
                 return HttpResponse::Ok().body("INDI server restarted and EQMod reconnected.");
             }
             Err(e) => {
-                eprintln!(
-                    "Failed to reconnect to EQMod (attempt {}): {}",
-                    retry_count + 1,
-                    e
-                );
+                let msg = format!("Failed to reconnect to EQMod (attempt {}): {}", retry_count + 1, e);
+                eprintln!("{}", msg);
+                let _ = data.event_sender.send(msg);
                 retry_count += 1;
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
@@ -630,7 +634,6 @@ async fn main() -> std::io::Result<()> {
     let state = web::Data::new(AppState {
         indi_client: Mutex::new(indi_client),
         camera: Mutex::new(camera),
-        goto_state: Mutex::new(GotoState::default()),
         event_sender: tx,
         is_running: Arc::new(AtomicBool::new(false)),
         location: Mutex::new(Location {
