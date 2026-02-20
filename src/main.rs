@@ -504,9 +504,10 @@ async fn handle_restart_indi(data: web::Data<AppState>) -> impl Responder {
         .spawn()
     {
         Ok(child) => {
+            let pid = child.id();
             *process_guard = Some(child);
-            println!("INDI server started with PID: {}", child.id());
-            let _ = data.event_sender.send(format!("INDI server started with PID: {}", child.id()));
+            println!("INDI server started with PID: {}", pid);
+            let _ = data.event_sender.send(format!("INDI server started with PID: {}", pid));
         }
         Err(e) => {
             eprintln!("Failed to start INDI server: {}", e);
