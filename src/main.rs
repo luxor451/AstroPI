@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::capture_solve::{make_initial_guess, planify_shoot, CaptureSettings};
@@ -23,7 +23,7 @@ struct Location {
 }
 
 struct AppState {
-    indi_client: Mutex<Option<eqmod_communication::IndiClient>>,
+    indi_client: RwLock<Option<eqmod_communication::IndiClient>>,
     camera: Mutex<Option<CameraController>>,
     event_sender: broadcast::Sender<String>,
     is_running: Arc<AtomicBool>,
@@ -85,7 +85,7 @@ async fn update_location(
     ));
 
     // Update hardware if necessary (e.g. tell INDI/EQMod new coords)
-    let client_opt = data.indi_client.lock().await;
+    let client_opt = data.indi_client.read().await;
     if let Some(client) = client_opt.as_ref() {
         if let Err(e) = client
             .set_location(payload.latitude, payload.longitude, payload.elevation)
@@ -121,7 +121,7 @@ async fn update_time(payload: web::Json<TimePayload>, data: web::Data<AppState>)
         .send(format!("Time updated: {}", payload.utc_datetime));
 
     // Update hardware if necessary
-    let client_opt = data.indi_client.lock().await;
+    let client_opt = data.indi_client.read().await;
     if let Some(client) = client_opt.as_ref() {
         if let Err(e) = client.set_time(&payload.utc_datetime).await {
             eprintln!("Failed to update time on EQMod: {}", e);
@@ -296,10 +296,11 @@ async fn handle_connect_camera(data: web::Data<AppState>) -> impl Responder {
 #[post("/disconnect")]
 async fn handle_disconnect(data: web::Data<AppState>) -> impl Responder {
     println!("Received Disconnect request");
+    let _ = data.event_sender.send("Received Disconnect request".to_string());
 
-    let mut client_opt = data.indi_client.lock().await;
-    if let Some(mut client) = client_opt.take() {
-        if let Err(e) = init_eqmod_disconnect(&mut client).await {
+    let mut client_opt = data.indi_client.write().await;
+    if let Some(client) = client_opt.take() {
+        if let Err(e) = init_eqmod_disconnect(&client).await {
             eprintln!("Error disconnecting EQMod: {}", e);
         } else {
             println!("EQMod disconnected.");
@@ -334,10 +335,18 @@ async fn handle_goto(payload: web::Json<GoToPayload>, data: web::Data<AppState>)
     // DEBUG: print to verify execution flow
     println!("Processing GoTo request...");
 
-    let mut client_opt = data.indi_client.lock().await;
-    let client = match client_opt.as_mut() {
-        Some(c) => c,
-        None => return HttpResponse::InternalServerError().body("EQMod not connected"),
+    // Set running flag
+    data.is_running.store(true, Ordering::Relaxed);
+
+    let client = {
+        let client_opt = data.indi_client.read().await;
+        match client_opt.as_ref() {
+            Some(c) => c.clone(),
+            None => {
+                data.is_running.store(false, Ordering::Relaxed);
+                return HttpResponse::InternalServerError().body("EQMod not connected")
+            },
+        }
     };
 
     let camera_opt = data.camera.lock().await;
@@ -394,15 +403,21 @@ async fn handle_goto(payload: web::Json<GoToPayload>, data: web::Data<AppState>)
 
     // TODO : add true instead of false for closed loop after testing
 
-    match goto_closed_loop(
-        &mut *client,
+    let result = goto_closed_loop(
+        &client,
         camera,
         platesolve_settings,
         target,
         false,
         &data.event_sender,
+        &data.is_running,
     )
-    .await
+    .await;
+
+    // Reset running flag
+    data.is_running.store(false, Ordering::Relaxed);
+
+    match result
     {
         Ok(_) => HttpResponse::Ok().body("GoTo completed successfully"),
         Err(e) => {
@@ -470,6 +485,31 @@ async fn handle_planify(
     }
 }
 
+#[post("/abort")]
+async fn handle_abort(data: web::Data<AppState>) -> impl Responder {
+    println!("Received Abort request");
+    let _ = data.event_sender.send("Received Abort request".to_string());
+    
+    // Set running flag false to stop loops
+    data.is_running.store(false, Ordering::Relaxed);
+
+    // Acquire read lock (should be available even if goto is running, as goto now uses read lock too)
+    let client_opt = data.indi_client.read().await;
+    if let Some(client) = client_opt.as_ref() {
+        println!("Aborting motion...");
+        let _ = data.event_sender.send("Aborting motion...".to_string());
+        if let Err(e) = client.abort_motion().await {
+            eprintln!("Failed to abort motion: {}", e);
+            let _ = data.event_sender.send(format!("Failed to abort motion: {}", e));
+        } else {
+            println!("Abort command sent.");
+            let _ = data.event_sender.send("Abort command sent.".to_string());
+        }
+    }
+    
+    HttpResponse::Ok().body("Abort signal sent")
+}
+
 #[post("/restart_indi")]
 async fn handle_restart_indi(data: web::Data<AppState>) -> impl Responder {
     println!("Received Restart INDI request");
@@ -526,7 +566,7 @@ async fn handle_restart_indi(data: web::Data<AppState>) -> impl Responder {
 
     // Reconnect EQMod client
     let _ = data.event_sender.send("Reconnecting EQMod client...".to_string());
-    let mut client_opt = data.indi_client.lock().await;
+    let mut client_opt = data.indi_client.write().await;
 
     // Attempt to drop the old client cleanly first if possible, though process is gone
     if let Some(client) = client_opt.take() {
@@ -578,7 +618,7 @@ async fn ping() -> impl Responder {
 #[get("/status")]
 async fn handle_status(data: web::Data<AppState>) -> impl Responder {
     let camera_connected = data.camera.lock().await.is_some();
-    let eqmod_connected = data.indi_client.lock().await.is_some();
+    let eqmod_connected = data.indi_client.read().await.is_some();
 
     HttpResponse::Ok().json(StatusResponse {
         camera_connected,
@@ -633,7 +673,7 @@ async fn main() -> std::io::Result<()> {
     };
 
     let state = web::Data::new(AppState {
-        indi_client: Mutex::new(indi_client),
+        indi_client: RwLock::new(indi_client),
         camera: Mutex::new(camera),
         event_sender: tx,
         is_running: Arc::new(AtomicBool::new(false)),
@@ -659,6 +699,7 @@ async fn main() -> std::io::Result<()> {
             .service(handle_stop)
             .service(handle_disconnect)
             .service(handle_connect_camera)
+            .service(handle_abort)
             .service(sse_events)
             .service(handle_status)
             .service(take_preview)

@@ -42,6 +42,7 @@ pub struct IndiState {
 }
 
 /// INDI client for communicating with telescope mounts
+#[derive(Clone)]
 pub struct IndiClient {
     writer: Arc<Mutex<OwnedWriteHalf>>,
     state: Arc<RwLock<IndiState>>,
@@ -249,7 +250,7 @@ impl IndiClient {
     ///
     /// This must be called before sending any commands to the mount
     /// Waits for the mount to fully initialize and report its properties
-    pub async fn connect(&mut self) -> Result<()> {
+    pub async fn connect(&self) -> Result<()> {
         self.send_switch("CONNECTION", &[("CONNECT", true), ("DISCONNECT", false)]).await?;
         
         // Wait for connection to complete
@@ -285,7 +286,7 @@ impl IndiClient {
     }
 
     /// Disconnect from the telescope mount
-    pub async fn disconnect(&mut self) -> Result<()> {
+    pub async fn disconnect(&self) -> Result<()> {
         self.send_switch("CONNECTION", &[("CONNECT", false), ("DISCONNECT", true)]).await
     }
     
@@ -333,7 +334,7 @@ impl IndiClient {
     }
 
     /// Send a goto command to the telescope mount
-    pub async fn goto(&mut self, ra: f64, dec: f64) -> Result<()> {
+    pub async fn goto(&self, ra: f64, dec: f64, is_running: Option<&std::sync::atomic::AtomicBool>) -> Result<()> {
         assert!(ra >= 0.0 && ra <= 24.0, "RA must be between 0 and 24 hours");
         assert!(dec >= -90.0 && dec <= 90.0, "DEC must be between -90 and +90 degrees");
 
@@ -349,13 +350,19 @@ impl IndiClient {
         println!("DEBUG: Sent Goto command. Starting monitor_slew...");
         
         // Monitor slew
-        self.monitor_slew(ra, dec).await?;
+        self.monitor_slew(ra, dec, is_running).await?;
         
         Ok(())
     }
 
+    /// Abort the current slew/motion
+    pub async fn abort_motion(&self) -> Result<()> {
+        println!("DEBUG: Sending TELESCOPE_ABORT_MOTION...");
+        self.send_switch("TELESCOPE_ABORT_MOTION", &[("ABORT", true)]).await
+    }
+
     /// Monitor the slew progress
-    async fn monitor_slew(&mut self, target_ra: f64, target_dec: f64) -> Result<()> {
+    async fn monitor_slew(&self, target_ra: f64, target_dec: f64, is_running: Option<&std::sync::atomic::AtomicBool>) -> Result<()> {
         let start = Instant::now();
         let mut last_pos: (f64, f64) = (0.0, 0.0);
         
@@ -364,6 +371,19 @@ impl IndiClient {
         sleep(Duration::from_millis(500)).await;
 
         loop {
+            // Check atomic bool if provided
+            if let Some(running) = is_running {
+                let val = running.load(std::sync::atomic::Ordering::Relaxed);
+                // println!("DEBUG: monitor_slew check is_running: {}", val);
+                if !val {
+                    println!("DEBUG: monitor_slew aborted by is_running flag.");
+                    if let Some(sender) = &self.sender {
+                         let _ = sender.send("Slew aborted by user.".to_string());
+                    }
+                    return Ok(());
+                }
+            }
+
             // Check for error messages first
             {
                 let mut msg_lock = self.latest_message.lock().await;

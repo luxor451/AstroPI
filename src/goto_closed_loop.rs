@@ -5,6 +5,8 @@ use astro_pi_plate_solving::CoordinateEquatorial;
 use camera_control::CameraController;
 use eqmod_communication::{IndiClient, IndiError};
 use tokio::sync::broadcast::Sender;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 const DEVICE_NAME: &str = "EQMod Mount";
 const PORT: u16 = 7624;
@@ -19,7 +21,7 @@ pub async fn init_eqmod_goto(
     sender: Sender<String>,
 ) -> Result<IndiClient, IndiError> {
     // Connect to EQMOD via INDI
-    let mut indi_client = IndiClient::new("localhost", PORT, DEVICE_NAME, Some(sender)).await?;
+    let indi_client = IndiClient::new("localhost", PORT, DEVICE_NAME, Some(sender)).await?;
     indi_client.connect().await?;
     indi_client
         .init_date_pos(latitude, longitude, elevation)
@@ -28,12 +30,13 @@ pub async fn init_eqmod_goto(
 }
 
 pub async fn goto_closed_loop(
-    client: &mut IndiClient,
+    client: &IndiClient,
     camera: Option<&CameraController>,
     setting: CaptureSettings,
     target_pos: CoordinateEquatorial,
     close_loop: bool,
     sender: &Sender<String>,
+    is_running: &Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("DEBUG: Inside goto_closed_loop");
     // Set target coordinates
@@ -50,11 +53,23 @@ pub async fn goto_closed_loop(
     println!("{}", msg);
     let _ = sender.send(msg);
 
-    client.goto(target_ra, target_dec).await?;
+    // Initial check
+    if !is_running.load(std::sync::atomic::Ordering::Relaxed) {
+        let _ = sender.send("Goto aborted by user.".to_string());
+        return Ok(());
+    }
+
+    client.goto(target_ra, target_dec, Some(is_running)).await?;
 
 
     if !close_loop {
         let _ = sender.send("Closed loop disabled, goto finished.".to_string());
+        return Ok(());
+    }
+
+    // Check before wait
+    if !is_running.load(std::sync::atomic::Ordering::Relaxed) {
+        let _ = sender.send("Goto aborted by user.".to_string());
         return Ok(());
     }
 
@@ -69,6 +84,12 @@ pub async fn goto_closed_loop(
 
     let _ = sender.send("Waiting for mount to settle...".to_string());
     tokio::time::sleep(std::time::Duration::from_secs(1)).await; // Wait for the mount to stop moving
+
+    // Check before capture
+    if !is_running.load(std::sync::atomic::Ordering::Relaxed) {
+        let _ = sender.send("Goto aborted by user.".to_string());
+        return Ok(());
+    }
 
     let _ = sender.send("Capturing and solving plate...".to_string());
     let result_platesolve = capture_and_solve(camera, &target_pos, &setting)?;
@@ -93,6 +114,11 @@ pub async fn goto_closed_loop(
     let mut i = 0;
 
     while distance_arcsec > TARGET_TOLLERANCE_ARCSEC && i < MAX_ITERATIONS {
+        if !is_running.load(std::sync::atomic::Ordering::Relaxed) {
+             let _ = sender.send("Goto aborted by user.".to_string());
+             return Ok(());
+        }
+
         let msg = format!(
             "Correction iteration {}: Error {:.2} arcsec > tolerance {:.2}. Adjusting...",
             i + 1,
@@ -106,11 +132,17 @@ pub async fn goto_closed_loop(
             .goto(
                 target_ra + (target_ra - solved_ra),
                 target_dec + (target_dec - solved_dec),
+                Some(is_running),
             )
             .await?;
 
         let _ = sender.send("Waiting for mount to settle...".to_string());
         tokio::time::sleep(std::time::Duration::from_secs(1)).await; // Wait for the mount to stop moving
+
+        if !is_running.load(std::sync::atomic::Ordering::Relaxed) {
+             let _ = sender.send("Goto aborted by user.".to_string());
+             return Ok(());
+        }
 
         let _ = sender.send("Capturing and solving again...".to_string());
         let result_platesolve = capture_and_solve(camera, &target_pos, &setting)?;
@@ -149,6 +181,6 @@ pub async fn goto_closed_loop(
     Ok(())
 }
 
-pub async fn init_eqmod_disconnect(client: &mut IndiClient) -> Result<(), IndiError> {
+pub async fn init_eqmod_disconnect(client: &IndiClient) -> Result<(), IndiError> {
     client.disconnect().await
 }
