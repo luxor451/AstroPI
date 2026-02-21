@@ -165,6 +165,7 @@ async fn update_time(payload: web::Json<TimePayload>, data: web::Data<AppState>)
 struct TakepreviewPayload {
     exposure: String,
     aperture: String,
+    iso: String,
 }
 
 #[derive(Deserialize)]
@@ -179,11 +180,8 @@ async fn take_preview(
 ) -> impl Responder {
     println!("Received preview command");
     
-    // Get global ISO setting
-    let iso = {
-        let settings = data.camera_settings.lock().await;
-        settings.iso
-    };
+    // Use ISO from payload (sent from frontend global settings)
+    let iso = payload.iso.parse::<u64>().unwrap_or(800);
 
     let camera_opt = data.camera.lock().await;
     let camera = match camera_opt.as_ref() {
@@ -198,6 +196,9 @@ async fn take_preview(
     } else {
         aperture_str.parse::<f64>().ok()
     };
+
+    println!("Preview params: ISO={}, exposure={}s, aperture={:?}", iso, exposure_seconds, aperture);
+    let _ = data.event_sender.send(format!("Preview params: ISO={}, exposure={}s, aperture={:?}", iso, exposure_seconds, aperture));
 
     let preview_dir = PathBuf::from("imgs/previews");
     if !preview_dir.exists() {
@@ -437,12 +438,14 @@ async fn handle_goto(payload: web::Json<GoToPayload>, data: web::Data<AppState>)
     // Cast ra parts to i64 as required by make_initial_guess
     let target = make_initial_guess(ra.0 as i64, ra.1 as i64, ra.2, dec.0, dec.1, dec.2);
 
+    // TODO : remove false/true
+
     let result = goto_closed_loop(
         &client,
         camera,
         platesolve_settings,
         target,
-        false,
+        true,
         &data.event_sender,
         &data.is_running,
     )
