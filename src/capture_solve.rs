@@ -190,8 +190,9 @@ pub async fn run_sequence(
     is_running: &Arc<AtomicBool>,
     should_pause: &Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting sequence (resuming from {})...", resume_from_idx);
-    let _ = sender.send(format!("Starting sequence (resuming from {})...", resume_from_idx));
+    // Initial message handled by caller to ensure immediate feedback
+    // println!("Starting sequence (resuming from {})...", resume_from_idx);
+    // let _ = sender.send(format!("Starting sequence (resuming from {})...", resume_from_idx));
 
     let mut total_count: u32 = 0;
     for item in sequence {

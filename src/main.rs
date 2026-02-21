@@ -163,7 +163,6 @@ async fn update_time(payload: web::Json<TimePayload>, data: web::Data<AppState>)
 
 #[derive(Deserialize)]
 struct TakepreviewPayload {
-    iso: String,
     exposure: String,
     aperture: String,
 }
@@ -179,13 +178,19 @@ async fn take_preview(
     payload: web::Json<TakepreviewPayload>,
 ) -> impl Responder {
     println!("Received preview command");
+    
+    // Get global ISO setting
+    let iso = {
+        let settings = data.camera_settings.lock().await;
+        settings.iso
+    };
+
     let camera_opt = data.camera.lock().await;
     let camera = match camera_opt.as_ref() {
         Some(c) => c,
         None => return HttpResponse::InternalServerError().body("Camera not connected"),
     };
 
-    let iso = payload.iso.parse::<u64>().unwrap_or(1600);
     let exposure_seconds = payload.exposure.parse::<u64>().unwrap_or(5);
     let aperture_str = payload.aperture.trim().replace("f/", "");
     let aperture = if aperture_str.is_empty() {
@@ -483,47 +488,90 @@ async fn handle_start_sequence(
         .event_sender
         .send("Received Start Sequence request".to_string());
 
-    let camera_opt = data.camera.lock().await;
-    let camera = match camera_opt.as_ref() {
-        Some(c) => c,
-        None => return HttpResponse::InternalServerError().body("Camera not connected"),
-    };
-
     let settings_guard = data.camera_settings.lock().await;
+    let iso = settings_guard.iso;
+    drop(settings_guard);
 
     let capture_settings = CaptureSettings {
-        iso: settings_guard.iso,
-        aperture: None, // Aperture control not fully exposed in frontend yet
-        exposure_seconds: 0, // Not used as global default anymore, sequence items define their own
+        iso,
+        aperture: None,
+        exposure_seconds: 0,
         save_directory: PathBuf::from("imgs/astro_captures"),
     };
-
-    // Drop guard so we don't hold lock during sequence
-    drop(settings_guard);
 
     // Set running state to true before starting
     data.is_running.store(true, Ordering::Relaxed);
     data.should_pause.store(false, Ordering::Relaxed);
 
-    match run_sequence(
-        &*camera,
-        &capture_settings,
-        &payload.sequence,
-        &payload.target,
-        &payload.date,
-        payload.subfolder.clone(),
-        payload.resume_from.unwrap_or(0),
-        &data.event_sender,
-        &data.is_running,
-        &data.should_pause,
-    ).await {
-        Ok(_) => HttpResponse::Ok().body("Plan completed successfully"),
-        Err(e) => {
-            eprintln!("Plan failed: {}", e);
-            let _ = data.event_sender.send(format!("Plan failed: {}", e));
-            HttpResponse::InternalServerError().body(format!("Plan failed: {}", e))
+    let data_clone = data.clone();
+    let payload = payload.into_inner();
+    let resume_idx = payload.resume_from.unwrap_or(0);
+
+    tokio::spawn(async move {
+        // Send a starting message immediately from the task, before acquiring camera lock
+        // This ensures the frontend gets feedback even if waiting for the lock
+        let start_msg = format!("Starting sequence (resuming from {})...", resume_idx);
+        println!("{}", start_msg);
+        let _ = data_clone.event_sender.send(start_msg);
+
+        let camera_opt = data_clone.camera.lock().await;
+        
+        let camera = match camera_opt.as_ref() {
+            Some(c) => c,
+            None => {
+                let msg = "Camera not connected, cannot start sequence.".to_string();
+                eprintln!("{}", msg);
+                let _ = data_clone.event_sender.send(msg);
+                return;
+            }
+        };
+
+        match run_sequence(
+            camera,
+            &capture_settings,
+            &payload.sequence,
+            &payload.target,
+            &payload.date,
+            payload.subfolder.clone(),
+            resume_idx,
+            &data_clone.event_sender,
+            &data_clone.is_running,
+            &data_clone.should_pause,
+        ).await {
+            Ok(_) => {
+                // If paused or cancelled, don't say "Sequence complete!" as run_sequence handles its own messages
+                let is_still_running = data_clone.is_running.load(Ordering::Relaxed);
+                let is_paused = data_clone.should_pause.load(Ordering::Relaxed);
+                
+                if is_still_running && !is_paused {
+                    let msg = "Sequence complete!".to_string();
+                    println!("{}", msg);
+                    let _ = data_clone.event_sender.send(msg);
+                }
+            },
+            Err(e) => {
+                let msg = format!("Plan failed: {}", e);
+                eprintln!("{}", msg);
+                let _ = data_clone.event_sender.send(msg);
+            }
         }
-    }
+        
+        // Reset running state when sequence finishes (unless paused, where we might want to resume?)
+        // For now, if paused, we keep is_running true so frontend sees it as active? 
+        // No, current logic is simple pause stops the loop in run_sequence but keeps state?
+        // Actually run_sequence returns on pause. So loop exits.
+        // If we want to resume, we need to handle that. But for now let's just fix the message.
+        if !data_clone.should_pause.load(Ordering::Relaxed) {
+             data_clone.is_running.store(false, Ordering::Relaxed);
+        } else {
+             // If paused, we might want to keep is_running=true to show "Paused" state vs "Stopped"?
+             // But run_sequence has returned, so the thread is gone.
+             // We probably need to treat pause as a stop that can be resumed by re-sending start_sequence with resume_from.
+             data_clone.is_running.store(false, Ordering::Relaxed);
+        }
+    });
+
+    HttpResponse::Ok().body("Sequence started in background")
 }
 
 #[post("/abort")]
@@ -693,6 +741,7 @@ async fn handle_restart_indi(data: web::Data<AppState>) -> impl Responder {
 struct StatusResponse {
     camera_connected: bool,
     eqmod_connected: bool,
+    is_running: bool,
 }
 
 #[get("/ping")]
@@ -702,12 +751,21 @@ async fn ping() -> impl Responder {
 
 #[get("/status")]
 async fn handle_status(data: web::Data<AppState>) -> impl Responder {
-    let camera_connected = data.camera.lock().await.is_some();
+    let camera_connected = if let Ok(guard) = data.camera.try_lock() {
+        guard.is_some()
+    } else {
+        // If we can't get the lock, it means the camera is busy (which implies it's connected/in use)
+        // This is an assumption, but prevents blocking the status check during long exposures.
+        true 
+    };
+    
     let eqmod_connected = data.indi_client.read().await.is_some();
+    let is_running = data.is_running.load(Ordering::Relaxed);
 
     HttpResponse::Ok().json(StatusResponse {
         camera_connected,
         eqmod_connected,
+        is_running,
     })
 }
 
