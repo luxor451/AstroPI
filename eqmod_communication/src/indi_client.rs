@@ -285,6 +285,46 @@ impl IndiClient {
         ))
     }
 
+    /// Get the current mount status
+    pub async fn get_mount_status(&self) -> String {
+        let state_lock = self.state.read().await;
+        if let Some(props) = state_lock.devices.get(&self.device_name) {
+            // Check if parked
+            if let Some(park_prop) = props.get("TELESCOPE_PARK") {
+                if park_prop.elements.get("PARK").map(|v| v == "On").unwrap_or(false) {
+                    return "PARKED".to_string();
+                }
+            }
+            
+            // Check if slewing or tracking
+            if let Some(coord) = props.get("EQUATORIAL_EOD_COORD") {
+                if coord.state == "Busy" {
+                    return "SLEWING".to_string();
+                } else if coord.state == "Ok" {
+                    return "TRACKING".to_string();
+                } else if coord.state == "Idle" {
+                    return "IDLE".to_string();
+                } else if coord.state == "Alert" {
+                    return "ERROR".to_string();
+                }
+            }
+        }
+        "UNKNOWN".to_string()
+    }
+
+    /// Get the current mount coordinates (RA, DEC)
+    pub async fn get_coordinates(&self) -> (f64, f64) {
+        let state_lock = self.state.read().await;
+        if let Some(props) = state_lock.devices.get(&self.device_name) {
+            if let Some(coord) = props.get("EQUATORIAL_EOD_COORD") {
+                let ra = coord.elements.get("RA").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                let dec = coord.elements.get("DEC").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                return (ra, dec);
+            }
+        }
+        (0.0, 0.0)
+    }
+
     /// Disconnect from the telescope mount
     pub async fn disconnect(&self) -> Result<()> {
         self.send_switch("CONNECTION", &[("CONNECT", false), ("DISCONNECT", true)]).await

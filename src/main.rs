@@ -742,6 +742,9 @@ struct StatusResponse {
     camera_connected: bool,
     eqmod_connected: bool,
     is_running: bool,
+    mount_status: String,
+    mount_ra: f64,
+    mount_dec: f64,
 }
 
 #[get("/ping")]
@@ -759,13 +762,24 @@ async fn handle_status(data: web::Data<AppState>) -> impl Responder {
         true 
     };
     
-    let eqmod_connected = data.indi_client.read().await.is_some();
+    let (eqmod_connected, mount_status, mount_ra, mount_dec) = {
+        let client_lock = data.indi_client.read().await;
+        if let Some(client) = &*client_lock {
+            let (ra, dec) = client.get_coordinates().await;
+            (true, client.get_mount_status().await, ra, dec)
+        } else {
+            (false, "DISCONNECTED".to_string(), 0.0, 0.0)
+        }
+    };
     let is_running = data.is_running.load(Ordering::Relaxed);
 
     HttpResponse::Ok().json(StatusResponse {
         camera_connected,
         eqmod_connected,
         is_running,
+        mount_status,
+        mount_ra,
+        mount_dec,
     })
 }
 
