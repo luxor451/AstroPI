@@ -1,7 +1,7 @@
 use core::f64;
 
 use crate::capture_solve::{capture_and_solve, CaptureSettings};
-use astro_pi_plate_solving::CoordinateEquatorial;
+use astro_pi_plate_solving::{CoordinateEquatorial, CameraConfig};
 use camera_control::CameraController;
 use eqmod_communication::{IndiClient, IndiError};
 use tokio::sync::broadcast::Sender;
@@ -37,6 +37,7 @@ pub async fn goto_closed_loop(
     close_loop: bool,
     sender: &Sender<String>,
     is_running: &Arc<AtomicBool>,
+    cam_config: &CameraConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("DEBUG: Inside goto_closed_loop");
     // Set target coordinates
@@ -92,7 +93,7 @@ pub async fn goto_closed_loop(
     }
 
     let _ = sender.send("Capturing and solving plate...".to_string());
-    let result_platesolve = capture_and_solve(camera, &target_pos, &setting).await?;
+    let result_platesolve = capture_and_solve(camera, &target_pos, &setting, cam_config).await?;
 
     let solved_coordinate = CoordinateEquatorial::from_radians(
         result_platesolve.solution.optical_axis_ra,
@@ -145,7 +146,7 @@ pub async fn goto_closed_loop(
         }
 
         let _ = sender.send("Capturing and solving again...".to_string());
-        let result_platesolve = capture_and_solve(camera, &target_pos, &setting).await?;
+        let result_platesolve = capture_and_solve(camera, &target_pos, &setting, cam_config).await?;
 
         let solved_coordinate = CoordinateEquatorial::from_radians(
             result_platesolve.solution.optical_axis_ra,

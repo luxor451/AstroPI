@@ -11,7 +11,8 @@ use tokio::sync::broadcast::Sender;
 // Removed chrono import plan as discussed, using string injection from payload
 
 use astro_pi_plate_solving::{
-    solve_plate, Arcdegrees, CoordinateEquatorial, PlateSolvingResult, RaHoursMinutesSeconds,
+    solve_plate_with_options, Arcdegrees, CoordinateEquatorial, PlateSolvingResult, RaHoursMinutesSeconds,
+    CameraConfig,
 };
 use camera_control::CameraController;
 use serde::Deserialize;
@@ -99,6 +100,7 @@ pub async fn capture_and_solve(
     camera: &CameraController,
     initial_guess: &CoordinateEquatorial,
     settings: &CaptureSettings,
+    cam_config: &CameraConfig,
 ) -> Result<CaptureAndSolveResult, Box<dyn std::error::Error>> {
     // Ensure save directory exists
     std::fs::create_dir_all(&settings.save_directory)?;
@@ -129,7 +131,7 @@ pub async fn capture_and_solve(
     );
 
     let solve_start = Instant::now();
-    let solution = solve_plate(&image_path, initial_guess)?;
+    let solution = solve_plate_with_options(&image_path, initial_guess, 20000, cam_config)?;
     let solve_time = solve_start.elapsed();
 
     if solution.coeffs_x.is_some() {
@@ -160,7 +162,7 @@ pub async fn capture_and_solve_quick(
     camera: &CameraController,
     initial_guess: &CoordinateEquatorial,
 ) -> Result<CaptureAndSolveResult, Box<dyn std::error::Error>> {
-    capture_and_solve(camera, initial_guess, &CaptureSettings::default()).await
+    capture_and_solve(camera, initial_guess, &CaptureSettings::default(), &CameraConfig::default()).await
 }
 
 /// Create initial guess from RA (hours, minutes, seconds) and Dec (degrees, arcmin, arcsec)

@@ -11,7 +11,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::capture_solve::{make_initial_guess, CaptureSettings, run_sequence, SequenceItem};
-use astro_pi_plate_solving::cr3_to_png;
+use astro_pi_plate_solving::{cr3_to_png, CameraConfig};
 use camera_control::CameraController;
 use goto_closed_loop::{goto_closed_loop, init_eqmod_disconnect, init_eqmod_goto};
 
@@ -26,6 +26,9 @@ struct Location {
 struct CameraGlobalSettings {
     pub iso: u64,
     pub platesolving_exposure: f64,
+    pub pixel_size_micron: f64,
+    pub focal_length_mm: f64,
+    pub bitdepth: u16,
 }
 
 impl Default for CameraGlobalSettings {
@@ -33,6 +36,20 @@ impl Default for CameraGlobalSettings {
         Self {
             iso: 800,
             platesolving_exposure: 2.0,
+            pixel_size_micron: 6.0,
+            focal_length_mm: 714.0,
+            bitdepth: 14,
+        }
+    }
+}
+
+impl CameraGlobalSettings {
+    /// Build a `CameraConfig` from the current global settings.
+    pub fn to_camera_config(&self) -> CameraConfig {
+        CameraConfig {
+            pixel_size_micron: self.pixel_size_micron,
+            focal_length_mm: self.focal_length_mm,
+            bitdepth: self.bitdepth,
         }
     }
 }
@@ -74,7 +91,10 @@ struct LocationPayload {
 #[derive(Deserialize)]
 struct CameraSettingsPayload {
     iso: String,
-    platesolvingExposure: String,
+    platesolving_exposure: String,
+    pixel_size_micron: Option<String>,
+    focal_length_mm: Option<String>,
+    bitdepth: Option<String>,
 }
 
 #[get("/location")]
@@ -436,6 +456,9 @@ async fn handle_goto(payload: web::Json<GoToPayload>, data: web::Data<AppState>)
         save_directory: PathBuf::from("imgs/goto/captures"),
     };
 
+    let cam_config = settings.to_camera_config();
+    drop(settings);
+
     // Cast ra parts to i64 as required by make_initial_guess
     let target = make_initial_guess(ra.0 as i64, ra.1 as i64, ra.2, dec.0, dec.1, dec.2);
 
@@ -449,6 +472,7 @@ async fn handle_goto(payload: web::Json<GoToPayload>, data: web::Data<AppState>)
         use_closed_loop,
         &data.event_sender,
         &data.is_running,
+        &cam_config,
     )
     .await;
 
@@ -474,10 +498,26 @@ async fn handle_update_camera_settings(
     let mut settings = data.camera_settings.lock().await;
 
     settings.iso = payload.iso.parse().unwrap_or(800);
-    settings.platesolving_exposure = payload.platesolvingExposure.parse().unwrap_or(2.0);
+    settings.platesolving_exposure = payload.platesolving_exposure.parse().unwrap_or(2.0);
 
-    println!("Updated settings: ISO={}, Plate Expose={}", settings.iso, settings.platesolving_exposure);
-    let _ = data.event_sender.send(format!("Camera settings updated: ISO={}, Plate Expose={}", settings.iso, settings.platesolving_exposure));
+    if let Some(ref v) = payload.pixel_size_micron {
+        settings.pixel_size_micron = v.parse().unwrap_or(settings.pixel_size_micron);
+    }
+    if let Some(ref v) = payload.focal_length_mm {
+        settings.focal_length_mm = v.parse().unwrap_or(settings.focal_length_mm);
+    }
+    if let Some(ref v) = payload.bitdepth {
+        settings.bitdepth = v.parse().unwrap_or(settings.bitdepth);
+    }
+
+    println!("Updated settings: ISO={}, Plate Expose={}, Pixel Size={}μm, Focal Length={}mm, Bitdepth={}",
+             settings.iso, settings.platesolving_exposure,
+             settings.pixel_size_micron, settings.focal_length_mm, settings.bitdepth);
+    let _ = data.event_sender.send(format!(
+        "Camera settings updated: ISO={}, Plate Expose={}, Pixel Size={}μm, Focal Length={}mm, Bitdepth={}",
+        settings.iso, settings.platesolving_exposure,
+        settings.pixel_size_micron, settings.focal_length_mm, settings.bitdepth
+    ));
 
     HttpResponse::Ok().body("Settings updated successfully")
 }
