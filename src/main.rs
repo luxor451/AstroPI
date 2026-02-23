@@ -692,6 +692,56 @@ async fn handle_start_sequence(
     HttpResponse::Ok().body("Sequence started in background")
 }
 
+#[derive(Deserialize)]
+struct ManualMovePayload {
+    /// One of "north", "south", "east", "west"
+    direction: String,
+    /// "start" to begin moving, "stop" to cease
+    action: String,
+    /// Slew-rate index 0-9 (optional, only applied on "start")
+    rate: Option<u8>,
+}
+
+#[post("/manual_move")]
+async fn handle_manual_move(
+    payload: web::Json<ManualMovePayload>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let dir = payload.direction.to_lowercase();
+    let start = payload.action.to_lowercase() == "start";
+
+    let client_opt = data.indi_client.read().await;
+    let client = match client_opt.as_ref() {
+        Some(c) => c,
+        None => return HttpResponse::InternalServerError().body("EQMod not connected"),
+    };
+
+    // Optionally set slew rate before starting
+    if start {
+        if let Some(rate) = payload.rate {
+            if let Err(e) = client.set_slew_rate(rate.min(9)).await {
+                eprintln!("Failed to set slew rate: {}", e);
+            }
+        }
+    }
+
+    match client.manual_move(&dir, start).await {
+        Ok(_) => {
+            let verb = if start { "started" } else { "stopped" };
+            let msg = format!("Manual move {} {}", dir, verb);
+            println!("{}", msg);
+            let _ = data.event_sender.send(msg.clone());
+            HttpResponse::Ok().body(msg)
+        }
+        Err(e) => {
+            let msg = format!("Manual move failed: {}", e);
+            eprintln!("{}", msg);
+            let _ = data.event_sender.send(msg.clone());
+            HttpResponse::InternalServerError().body(msg)
+        }
+    }
+}
+
 #[post("/abort")]
 async fn handle_abort(data: web::Data<AppState>) -> impl Responder {
     println!("Received Abort request");
@@ -1116,6 +1166,7 @@ async fn main() -> std::io::Result<()> {
             .service(handle_disconnect)
             .service(handle_connect_camera)
             .service(handle_abort)
+            .service(handle_manual_move)
             .service(handle_park)
             .service(handle_unpark)
             .service(handle_meridian_flip)

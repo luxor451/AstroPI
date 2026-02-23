@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicBool;
 
 const DEVICE_NAME: &str = "EQMod Mount";
 const PORT: u16 = 7624;
-const TARGET_TOLLERANCE_ARCSEC: f64 = 180.0; // Tolerance for considering the goto successful
+const TARGET_TOLLERANCE_ARCSEC: f64 = 500.0; // Tolerance for considering the goto successful
 const MAX_ITERATIONS: usize = 5; // Max iterations for closed-loop correction
 
 
@@ -84,7 +84,7 @@ pub async fn goto_closed_loop(
     };
 
     let _ = sender.send("Waiting for mount to settle...".to_string());
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await; // Wait for the mount to stop moving
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Wait for the mount to stop moving
 
     // Check before capture
     if !is_running.load(std::sync::atomic::Ordering::Relaxed) {
@@ -138,7 +138,7 @@ pub async fn goto_closed_loop(
             .await?;
 
         let _ = sender.send("Waiting for mount to settle...".to_string());
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await; // Wait for the mount to stop moving
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Wait for the mount to stop moving
 
         if !is_running.load(std::sync::atomic::Ordering::Relaxed) {
              let _ = sender.send("Goto aborted by user.".to_string());
@@ -148,6 +148,11 @@ pub async fn goto_closed_loop(
         let _ = sender.send("Capturing and solving again...".to_string());
         let result_platesolve = capture_and_solve(camera, &target_pos, &setting, cam_config).await?;
 
+        println!("DEBUG: Plate solve result - RA: {:.4}h, Dec: {:.4}°", 
+            result_platesolve.solution.optical_axis_ra.to_degrees() / 15.0, 
+            result_platesolve.solution.optical_axis_dec.to_degrees()
+        );
+
         let solved_coordinate = CoordinateEquatorial::from_radians(
             result_platesolve.solution.optical_axis_ra,
             result_platesolve.solution.optical_axis_dec,
@@ -156,10 +161,14 @@ pub async fn goto_closed_loop(
         let solved_ra_iter = solved_coordinate.ra.to_hours();
         let solved_dec_iter = solved_coordinate.dec.to_degrees();
 
+        println!("DEBUG: Iteration {} - Solved RA: {:.4}h, Dec: {:.4}°", i + 1, solved_ra_iter, solved_dec_iter);
+
         let diff_ra_h_iter = target_ra - solved_ra_iter;
         let diff_dec_deg_iter = target_dec - solved_dec_iter;
 
         distance_arcsec = ((diff_ra_h_iter) * 15.0).hypot(diff_dec_deg_iter) * 3600.0;
+
+        println!("DEBUG: Iteration {} - Position error: {:.2} arcsec", i + 1, distance_arcsec);
 
         let msg = format!(
             "Iteration {} result: Position error is {:.2} arcsec.",

@@ -440,6 +440,55 @@ impl IndiClient {
         self.send_switch("TELESCOPE_ABORT_MOTION", &[("ABORT", true)]).await
     }
 
+    /// Start or stop manual motion in a cardinal direction.
+    ///
+    /// `direction` must be one of `"north"`, `"south"`, `"east"`, `"west"`.
+    /// When `start` is `true` motion begins; when `false` it stops.
+    pub async fn manual_move(&self, direction: &str, start: bool) -> Result<()> {
+        match direction {
+            "north" => {
+                self.send_switch("TELESCOPE_MOTION_NS", &[
+                    ("MOTION_NORTH", start),
+                    ("MOTION_SOUTH", false),
+                ]).await
+            }
+            "south" => {
+                self.send_switch("TELESCOPE_MOTION_NS", &[
+                    ("MOTION_NORTH", false),
+                    ("MOTION_SOUTH", start),
+                ]).await
+            }
+            "east" => {
+                self.send_switch("TELESCOPE_MOTION_WE", &[
+                    ("MOTION_WEST", false),
+                    ("MOTION_EAST", start),
+                ]).await
+            }
+            "west" => {
+                self.send_switch("TELESCOPE_MOTION_WE", &[
+                    ("MOTION_WEST", start),
+                    ("MOTION_EAST", false),
+                ]).await
+            }
+            _ => Err(IndiError::Command(format!("Unknown direction: {}", direction))),
+        }
+    }
+
+    /// Set the slew rate for manual motion.
+    ///
+    /// EQMod typically exposes a `TELESCOPE_SLEW_RATE` switch with numeric
+    /// indices `1x` … `MAX`.  The `rate_index` selects which one to turn on
+    /// (0-based).  Common mapping: 0 = 1x, 1 = 2x, 2 = 4x, … , 9 = MAX.
+    pub async fn set_slew_rate(&self, rate_index: u8) -> Result<()> {
+        let labels = ["1x", "2x", "4x", "8x", "16x", "32x", "64x", "128x", "256x", "MAX"];
+        let switches: Vec<(&str, bool)> = labels
+            .iter()
+            .enumerate()
+            .map(|(i, &lbl)| (lbl, i == rate_index as usize))
+            .collect();
+        self.send_switch("TELESCOPE_SLEW_RATE", &switches).await
+    }
+
     // =================================================================
     // Pier Side & Hour Angle helpers
     // =================================================================
