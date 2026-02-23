@@ -25,6 +25,26 @@ pub enum IndiError {
 
 pub type Result<T> = std::result::Result<T, IndiError>;
 
+/// Which side of the pier the telescope is on.
+/// PIER_WEST means the scope points East (counterweight-down for most GEMs).
+/// PIER_EAST means the scope points West.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PierSide {
+    West,
+    East,
+    Unknown,
+}
+
+impl std::fmt::Display for PierSide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PierSide::West => write!(f, "WEST"),
+            PierSide::East => write!(f, "EAST"),
+            PierSide::Unknown => write!(f, "UNKNOWN"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IndiProperty {
     pub name: String,
@@ -418,6 +438,193 @@ impl IndiClient {
     pub async fn abort_motion(&self) -> Result<()> {
         println!("DEBUG: Sending TELESCOPE_ABORT_MOTION...");
         self.send_switch("TELESCOPE_ABORT_MOTION", &[("ABORT", true)]).await
+    }
+
+    // =================================================================
+    // Pier Side & Hour Angle helpers
+    // =================================================================
+
+    /// Read TELESCOPE_PIER_SIDE from the cached INDI state.
+    ///
+    /// Returns `PierSide::West` when the switch element `PIER_WEST` is `"On"`,
+    /// `PierSide::East` when `PIER_EAST` is `"On"`, or `PierSide::Unknown`
+    /// if the property has not been reported yet.
+    pub async fn get_pier_side(&self) -> PierSide {
+        let state_lock = self.state.read().await;
+        if let Some(props) = state_lock.devices.get(&self.device_name) {
+            if let Some(pier) = props.get("TELESCOPE_PIER_SIDE") {
+                if pier.elements.get("PIER_WEST").map(|v| v == "On").unwrap_or(false) {
+                    return PierSide::West;
+                }
+                if pier.elements.get("PIER_EAST").map(|v| v == "On").unwrap_or(false) {
+                    return PierSide::East;
+                }
+            }
+        }
+        PierSide::Unknown
+    }
+
+    /// Compute the current Hour Angle in hours.
+    ///
+    /// HA = LST − RA  (range −12 … +12 h).
+    ///
+    /// Requires longitude (degrees, East-positive) so we can derive LST.
+    /// Returns `None` if the mount has not yet reported coordinates.
+    pub async fn get_hour_angle(&self, longitude_deg: f64) -> Option<f64> {
+        let (ra_h, _dec) = self.get_coordinates().await;
+        // RA == 0 could be valid, but if we never got coords the mount reports (0,0),
+        // so only bail when the property is truly absent
+        let has_coords = {
+            let s = self.state.read().await;
+            s.devices.get(&self.device_name)
+                .and_then(|p| p.get("EQUATORIAL_EOD_COORD"))
+                .is_some()
+        };
+        if !has_coords {
+            return None;
+        }
+
+        let lst_h = Self::local_sidereal_time(longitude_deg);
+        let mut ha = lst_h - ra_h;
+        // Normalise to −12 … +12
+        if ha < -12.0 { ha += 24.0; }
+        if ha > 12.0  { ha -= 24.0; }
+        Some(ha)
+    }
+
+    /// Returns `true` when the target has crossed the meridian and the mount
+    /// should flip.  Crossing is detected when:
+    ///   • pier side is WEST  **and**  HA > `post_meridian_limit_h`
+    ///
+    /// `post_meridian_limit_h` is a small positive value (e.g. 0.1 h ≈ 6 min)
+    /// that lets you delay the flip until the target is slightly past the
+    /// meridian, which is common practice to avoid flipping back and forth.
+    pub async fn needs_meridian_flip(
+        &self,
+        longitude_deg: f64,
+        post_meridian_limit_h: f64,
+    ) -> bool {
+        let pier = self.get_pier_side().await;
+        if pier != PierSide::West {
+            return false; // only flip when currently on the west side
+        }
+        match self.get_hour_angle(longitude_deg).await {
+            Some(ha) => ha > post_meridian_limit_h,
+            None => false,
+        }
+    }
+
+    /// Compute the time (in fractional hours) until the mount would need a
+    /// meridian flip, i.e. until HA reaches `post_meridian_limit_h`.
+    ///
+    /// Returns:
+    ///  - `Some(positive)` if the flip has not happened yet (hours remaining).
+    ///  - `Some(0.0)` or `Some(negative)` if the flip is already overdue.
+    ///  - `None` if pier side is not West or coordinates are unavailable.
+    ///
+    /// The conversion factor from HA-hours to solar hours accounts for the
+    /// sidereal rate (≈ 1.00274 HA-hours per solar hour).
+    pub async fn time_to_meridian_flip(
+        &self,
+        longitude_deg: f64,
+        post_meridian_limit_h: f64,
+    ) -> Option<f64> {
+        let pier = self.get_pier_side().await;
+        if pier != PierSide::West {
+            return None; // no flip expected when on the East side
+        }
+        let ha = self.get_hour_angle(longitude_deg).await?;
+        // Sidereal rate: 24 HA-hours per 23.9345 solar hours
+        const SIDEREAL_RATE: f64 = 24.0 / 23.9344696;
+        let delta_ha = post_meridian_limit_h - ha;
+        Some(delta_ha / SIDEREAL_RATE)
+    }
+
+    /// Execute a meridian flip by explicitly requesting the opposite pier side
+    /// and then re-issuing a GOTO to the target coordinates.
+    ///
+    /// The sequence is:
+    ///   1. Read current pier side.
+    ///   2. Set `TELESCOPE_PIER_SIDE` to the **opposite** side so EQMod knows
+    ///      which orientation to use for the slew.
+    ///   3. Issue a regular GOTO to the target.
+    ///   4. Verify the pier side actually changed.
+    ///
+    /// Returns the new pier side after the slew.
+    pub async fn execute_meridian_flip(
+        &self,
+        target_ra_h: f64,
+        target_dec_deg: f64,
+        is_running: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<PierSide> {
+        let before = self.get_pier_side().await;
+        println!("Meridian flip: pier side before = {}", before);
+
+        // Request the opposite pier side BEFORE issuing the goto.
+        match before {
+            PierSide::West => {
+                println!("Meridian flip: requesting PIER_EAST");
+                self.send_switch("TELESCOPE_PIER_SIDE", &[
+                    ("PIER_EAST", true),
+                    ("PIER_WEST", false),
+                ]).await?;
+            }
+            PierSide::East => {
+                println!("Meridian flip: requesting PIER_WEST");
+                self.send_switch("TELESCOPE_PIER_SIDE", &[
+                    ("PIER_WEST", true),
+                    ("PIER_EAST", false),
+                ]).await?;
+            }
+            PierSide::Unknown => {
+                println!("Meridian flip: pier side unknown, proceeding with goto only");
+            }
+        }
+
+        // Small delay to let EQMod process the pier side change request.
+        sleep(Duration::from_millis(500)).await;
+
+        // Re-issue goto – EQMod should now slew to the opposite side.
+        self.goto(target_ra_h, target_dec_deg, is_running).await?;
+
+        let after = self.get_pier_side().await;
+        println!("Meridian flip: pier side after  = {}", after);
+
+        if before != PierSide::Unknown && after == before {
+            println!("WARNING: pier side did not change after meridian flip goto");
+            if let Some(sender) = &self.sender {
+                let _ = sender.send(
+                    "WARNING: Pier side did not change after meridian flip. \
+                     The mount may not support forced pier side changes."
+                        .to_string(),
+                );
+            }
+        }
+
+        Ok(after)
+    }
+
+    // --------- internal helpers ---------
+
+    /// Greenwich Mean Sidereal Time in hours for the current UTC instant.
+    fn gmst_hours() -> f64 {
+        let now = Utc::now();
+        // Julian date
+        let jd = now.timestamp() as f64 / 86400.0 + 2440587.5;
+        let t = (jd - 2451545.0) / 36525.0;
+        // IAU formula (hours)
+        let gmst = 280.46061837
+            + 360.98564736629 * (jd - 2451545.0)
+            + 0.000387933 * t * t
+            - (t * t * t) / 38710000.0;
+        (gmst % 360.0 + 360.0) % 360.0 / 15.0
+    }
+
+    /// Local Sidereal Time in hours.
+    fn local_sidereal_time(longitude_deg: f64) -> f64 {
+        let gmst = Self::gmst_hours();
+        let lst = gmst + longitude_deg / 15.0;
+        ((lst % 24.0) + 24.0) % 24.0
     }
 
     /// Monitor the slew progress

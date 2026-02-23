@@ -15,6 +15,7 @@ use astro_pi_plate_solving::{
     CameraConfig,
 };
 use camera_control::CameraController;
+use eqmod_communication::IndiClient;
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -180,6 +181,25 @@ pub fn make_initial_guess(
     )
 }
 
+/// Configuration for automatic meridian-flip detection during sequences.
+///
+/// When provided to [`run_sequence`], the loop will check before each Light
+/// frame whether the mount has crossed the meridian and, if so, re-issue a
+/// GOTO to let EQMod pick the opposite pier side.
+#[derive(Clone, Debug)]
+pub struct MeridianFlipConfig {
+    /// Observatory longitude in degrees (East-positive).
+    pub longitude_deg: f64,
+    /// Target RA in hours (0…24).
+    pub target_ra_h: f64,
+    /// Target Dec in degrees (-90…90).
+    pub target_dec_deg: f64,
+    /// How many hours *past* the meridian the mount is allowed before
+    /// triggering a flip (e.g. 0.1 h ≈ 6 min). Prevents flipping back and
+    /// forth right at the meridian.
+    pub post_meridian_limit_h: f64,
+}
+
 pub async fn run_sequence(
     camera: &CameraController,
     settings: &CaptureSettings, // Base settings (ISO, Save dir root)
@@ -191,6 +211,8 @@ pub async fn run_sequence(
     sender: &Sender<String>,
     is_running: &Arc<AtomicBool>,
     should_pause: &Arc<AtomicBool>,
+    indi_client: Option<&IndiClient>,
+    flip_config: Option<&MeridianFlipConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Initial message handled by caller to ensure immediate feedback
     // println!("Starting sequence (resuming from {})...", resume_from_idx);
@@ -260,6 +282,48 @@ pub async fn run_sequence(
                 println!("{}", msg);
                 let _ = sender.send(msg);
                 return Ok(());
+            }
+
+            // --- Meridian flip check (Light frames only) ---
+            if matches!(item.item_type, SequenceType::Light) {
+                if let (Some(client), Some(fc)) = (indi_client, flip_config) {
+                    if client.needs_meridian_flip(fc.longitude_deg, fc.post_meridian_limit_h).await {
+                        let pier_before = client.get_pier_side().await;
+                        let ha = client.get_hour_angle(fc.longitude_deg).await.unwrap_or(f64::NAN);
+                        let flip_msg = format!(
+                            "Meridian flip triggered! Pier={}, HA={:.3}h. Flipping...",
+                            pier_before, ha
+                        );
+                        println!("{}", flip_msg);
+                        let _ = sender.send(flip_msg);
+
+                        match client.execute_meridian_flip(
+                            fc.target_ra_h,
+                            fc.target_dec_deg,
+                            Some(is_running.as_ref()),
+                        ).await {
+                            Ok(new_side) => {
+                                let msg = format!("Meridian flip complete. New pier side: {}", new_side);
+                                println!("{}", msg);
+                                let _ = sender.send(msg);
+
+                                // Let the mount settle after the flip
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            }
+                            Err(e) => {
+                                let msg = format!("Meridian flip failed: {}. Continuing anyway.", e);
+                                eprintln!("{}", msg);
+                                let _ = sender.send(msg);
+                            }
+                        }
+
+                        // Re-check stop/pause after the flip slew
+                        if !is_running.load(Ordering::Relaxed) {
+                            let _ = sender.send("Sequence cancelled during meridian flip.".to_string());
+                            return Ok(());
+                        }
+                    }
+                }
             }
 
             let msg = format!("PROGRESS:{}/{}:Capturing {} frame {}/{} ({}s)...", current_global_idx, total_count, type_name, i + 1, item.count, exposure);

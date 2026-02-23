@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::capture_solve::{make_initial_guess, CaptureSettings, run_sequence, SequenceItem};
+use crate::capture_solve::{make_initial_guess, CaptureSettings, MeridianFlipConfig, run_sequence, SequenceItem};
 use astro_pi_plate_solving::{cr3_to_png, CameraConfig};
 use camera_control::CameraController;
 use goto_closed_loop::{goto_closed_loop, init_eqmod_disconnect, init_eqmod_goto};
@@ -63,6 +63,8 @@ struct AppState {
     indi_server_process: Mutex<Option<std::process::Child>>,
     camera_settings: Mutex<CameraGlobalSettings>,
     should_pause: Arc<AtomicBool>,
+    /// Active meridian-flip configuration (set when a sequence with flip is running).
+    active_flip_config: Mutex<Option<MeridianFlipConfig>>,
 }
 
 #[derive(Deserialize)]
@@ -79,6 +81,14 @@ struct StartSequencePayload {
     date: String,
     resume_from: Option<u32>,
     subfolder: Option<String>,
+    /// Target RA in "HH:MM:SS" format (needed for meridian flip).
+    ra: Option<String>,
+    /// Target Dec in "DD:MM:SS" format (needed for meridian flip).
+    dec: Option<String>,
+    /// Enable automatic meridian-flip detection during the sequence.
+    meridian_flip: Option<bool>,
+    /// How many hours past the meridian to wait before flipping (default: 0.1 ≈ 6 min).
+    post_meridian_limit_h: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -551,6 +561,60 @@ async fn handle_start_sequence(
     let payload = payload.into_inner();
     let resume_idx = payload.resume_from.unwrap_or(0);
 
+    // Build optional meridian-flip configuration
+    let flip_config: Option<MeridianFlipConfig> = if payload.meridian_flip.unwrap_or(false) {
+        // We need RA, Dec and the observatory longitude.
+        let parse_hms = |s: &str| -> Option<f64> {
+            let p: Vec<&str> = s.trim().split(':').collect();
+            if p.len() != 3 { return None; }
+            let h: f64 = p[0].parse().ok()?;
+            let m: f64 = p[1].parse().ok()?;
+            let s: f64 = p[2].parse().ok()?;
+            Some(h + m / 60.0 + s / 3600.0)
+        };
+        let parse_dms = |s: &str| -> Option<f64> {
+            let p: Vec<&str> = s.trim().split(':').collect();
+            if p.len() != 3 { return None; }
+            let d: f64 = p[0].parse().ok()?;
+            let m: f64 = p[1].parse().ok()?;
+            let s: f64 = p[2].parse().ok()?;
+            let sign = if d < 0.0 { -1.0 } else { 1.0 };
+            Some(sign * (d.abs() + m / 60.0 + s / 3600.0))
+        };
+
+        let ra_h = payload.ra.as_deref().and_then(parse_hms);
+        let dec_deg = payload.dec.as_deref().and_then(parse_dms);
+
+        match (ra_h, dec_deg) {
+            (Some(ra), Some(dec)) => {
+                let longitude = {
+                    let loc = data.location.lock().await;
+                    loc.longitude
+                };
+                Some(MeridianFlipConfig {
+                    longitude_deg: longitude,
+                    target_ra_h: ra,
+                    target_dec_deg: dec,
+                    post_meridian_limit_h: payload.post_meridian_limit_h.unwrap_or(0.1),
+                })
+            }
+            _ => {
+                let _ = data.event_sender.send(
+                    "Meridian flip requested but RA/Dec missing or invalid in payload. Flip disabled.".to_string(),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Store the active flip config so /status can read it.
+    {
+        let mut afc = data.active_flip_config.lock().await;
+        *afc = flip_config.clone();
+    }
+
     tokio::spawn(async move {
         // Send a starting message immediately from the task, before acquiring camera lock
         // This ensures the frontend gets feedback even if waiting for the lock
@@ -570,6 +634,12 @@ async fn handle_start_sequence(
             }
         };
 
+        // Obtain an INDI client reference for meridian-flip support.
+        // We acquire a read-lock here; it is held for the duration of the
+        // sequence but does NOT block concurrent reads (status, etc.).
+        let client_guard = data_clone.indi_client.read().await;
+        let indi_ref = client_guard.as_ref();
+
         match run_sequence(
             camera,
             &capture_settings,
@@ -581,6 +651,8 @@ async fn handle_start_sequence(
             &data_clone.event_sender,
             &data_clone.is_running,
             &data_clone.should_pause,
+            indi_ref,
+            flip_config.as_ref(),
         ).await {
             Ok(_) => {
                 // If paused or cancelled, don't say "Sequence complete!" as run_sequence handles its own messages
@@ -608,10 +680,12 @@ async fn handle_start_sequence(
         if !data_clone.should_pause.load(Ordering::Relaxed) {
              data_clone.is_running.store(false, Ordering::Relaxed);
         } else {
-             // If paused, we might want to keep is_running=true to show "Paused" state vs "Stopped"?
-             // But run_sequence has returned, so the thread is gone.
-             // We probably need to treat pause as a stop that can be resumed by re-sending start_sequence with resume_from.
              data_clone.is_running.store(false, Ordering::Relaxed);
+        }
+        // Clear active flip config when sequence ends.
+        {
+            let mut afc = data_clone.active_flip_config.lock().await;
+            *afc = None;
         }
     });
 
@@ -685,6 +759,75 @@ async fn handle_unpark(data: web::Data<AppState>) -> impl Responder {
     }
 
     HttpResponse::Ok().body("Unpark signal sent")
+}
+
+#[derive(Deserialize)]
+struct MeridianFlipPayload {
+    /// Target RA in "HH:MM:SS" format.
+    ra: String,
+    /// Target Dec in "DD:MM:SS" format.
+    dec: String,
+}
+
+#[post("/meridian_flip")]
+async fn handle_meridian_flip(
+    payload: web::Json<MeridianFlipPayload>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    println!("Received Force Meridian Flip request");
+    let _ = data.event_sender.send("Received Force Meridian Flip request".to_string());
+
+    let parse_hms = |s: &str| -> Option<f64> {
+        let p: Vec<&str> = s.trim().split(':').collect();
+        if p.len() != 3 { return None; }
+        let h: f64 = p[0].parse().ok()?;
+        let m: f64 = p[1].parse().ok()?;
+        let s: f64 = p[2].parse().ok()?;
+        Some(h + m / 60.0 + s / 3600.0)
+    };
+    let parse_dms = |s: &str| -> Option<f64> {
+        let p: Vec<&str> = s.trim().split(':').collect();
+        if p.len() != 3 { return None; }
+        let d: f64 = p[0].parse().ok()?;
+        let m: f64 = p[1].parse().ok()?;
+        let s: f64 = p[2].parse().ok()?;
+        let sign = if d < 0.0 { -1.0 } else { 1.0 };
+        Some(sign * (d.abs() + m / 60.0 + s / 3600.0))
+    };
+
+    let ra_h = match parse_hms(&payload.ra) {
+        Some(v) => v,
+        None => return HttpResponse::BadRequest().body("Invalid RA format. Expected HH:MM:SS"),
+    };
+    let dec_deg = match parse_dms(&payload.dec) {
+        Some(v) => v,
+        None => return HttpResponse::BadRequest().body("Invalid DEC format. Expected DD:MM:SS"),
+    };
+
+    let client_opt = data.indi_client.read().await;
+    let client = match client_opt.as_ref() {
+        Some(c) => c,
+        None => return HttpResponse::InternalServerError().body("EQMod not connected"),
+    };
+
+    let _ = data.event_sender.send(format!(
+        "Force meridian flip to RA={:.4}h, Dec={:.4}°", ra_h, dec_deg
+    ));
+
+    match client.execute_meridian_flip(ra_h, dec_deg, None).await {
+        Ok(new_side) => {
+            let msg = format!("Meridian flip complete. New pier side: {}", new_side);
+            println!("{}", msg);
+            let _ = data.event_sender.send(msg);
+            HttpResponse::Ok().body(format!("Flip complete. Pier side: {}", new_side))
+        }
+        Err(e) => {
+            let msg = format!("Meridian flip failed: {}", e);
+            eprintln!("{}", msg);
+            let _ = data.event_sender.send(msg.clone());
+            HttpResponse::InternalServerError().body(msg)
+        }
+    }
 }
 
 #[post("/shutdown")]
@@ -831,6 +974,10 @@ struct StatusResponse {
     mount_status: String,
     mount_ra: f64,
     mount_dec: f64,
+    pier_side: String,
+    hour_angle: Option<f64>,
+    /// Estimated minutes until the meridian flip triggers (null when no flip is configured).
+    time_to_flip_minutes: Option<f64>,
 }
 
 #[get("/ping")]
@@ -848,13 +995,31 @@ async fn handle_status(data: web::Data<AppState>) -> impl Responder {
         true 
     };
     
-    let (eqmod_connected, mount_status, mount_ra, mount_dec) = {
+    let (eqmod_connected, mount_status, mount_ra, mount_dec, pier_side, hour_angle, time_to_flip_minutes) = {
         let client_lock = data.indi_client.read().await;
         if let Some(client) = &*client_lock {
             let (ra, dec) = client.get_coordinates().await;
-            (true, client.get_mount_status().await, ra, dec)
+            let ps = client.get_pier_side().await;
+            let longitude = {
+                let loc = data.location.lock().await;
+                loc.longitude
+            };
+            let ha = client.get_hour_angle(longitude).await;
+
+            // Compute time-to-flip from the active flip config (if any).
+            let ttf = {
+                let afc = data.active_flip_config.lock().await;
+                if let Some(fc) = afc.as_ref() {
+                    client.time_to_meridian_flip(fc.longitude_deg, fc.post_meridian_limit_h)
+                        .await
+                        .map(|h| h * 60.0) // convert hours → minutes
+                } else {
+                    None
+                }
+            };
+            (true, client.get_mount_status().await, ra, dec, ps.to_string(), ha, ttf)
         } else {
-            (false, "DISCONNECTED".to_string(), 0.0, 0.0)
+            (false, "DISCONNECTED".to_string(), 0.0, 0.0, "UNKNOWN".to_string(), None, None)
         }
     };
     let is_running = data.is_running.load(Ordering::Relaxed);
@@ -866,6 +1031,9 @@ async fn handle_status(data: web::Data<AppState>) -> impl Responder {
         mount_status,
         mount_ra,
         mount_dec,
+        pier_side,
+        hour_angle,
+        time_to_flip_minutes,
     })
 }
 
@@ -928,6 +1096,7 @@ async fn main() -> std::io::Result<()> {
         indi_server_process: Mutex::new(Some(indi_process)),
         camera_settings: Mutex::new(CameraGlobalSettings::default()),
         should_pause: Arc::new(AtomicBool::new(false)),
+        active_flip_config: Mutex::new(None),
     });
 
     println!("Starting server at http://0.0.0.0:8080");
@@ -949,6 +1118,7 @@ async fn main() -> std::io::Result<()> {
             .service(handle_abort)
             .service(handle_park)
             .service(handle_unpark)
+            .service(handle_meridian_flip)
             .service(sse_events)
             .service(handle_status)
             .service(take_preview)
