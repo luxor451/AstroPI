@@ -73,7 +73,7 @@ struct LocationPayload {
 #[derive(Deserialize)]
 struct CameraSettingsPayload {
     iso: String,
-    platesolvingExposure: String,
+    platesolving_exposure: String,
 }
 
 #[get("/location")]
@@ -438,14 +438,12 @@ async fn handle_goto(payload: web::Json<GoToPayload>, data: web::Data<AppState>)
     // Cast ra parts to i64 as required by make_initial_guess
     let target = make_initial_guess(ra.0 as i64, ra.1 as i64, ra.2, dec.0, dec.1, dec.2);
 
-    // TODO : remove false/true
-
     let result = goto_closed_loop(
         &client,
         camera,
         platesolve_settings,
         target,
-        true,
+        false,
         &data.event_sender,
         &data.is_running,
     )
@@ -473,7 +471,7 @@ async fn handle_update_camera_settings(
     let mut settings = data.camera_settings.lock().await;
 
     settings.iso = payload.iso.parse().unwrap_or(800);
-    settings.platesolving_exposure = payload.platesolvingExposure.parse().unwrap_or(2.0);
+    settings.platesolving_exposure = payload.platesolving_exposure.parse().unwrap_or(2.0);
 
     println!("Updated settings: ISO={}, Plate Expose={}", settings.iso, settings.platesolving_exposure);
     let _ = data.event_sender.send(format!("Camera settings updated: ISO={}, Plate Expose={}", settings.iso, settings.platesolving_exposure));
@@ -644,6 +642,48 @@ async fn handle_unpark(data: web::Data<AppState>) -> impl Responder {
     }
 
     HttpResponse::Ok().body("Unpark signal sent")
+}
+
+#[post("/shutdown")]
+async fn handle_shutdown(data: web::Data<AppState>) -> impl Responder {
+    println!("Received Shutdown request");
+    let _ = data.event_sender.send("Shutting down Raspberry Pi...".to_string());
+
+    // Give a moment for the SSE message to be sent
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    match std::process::Command::new("sudo")
+        .args(&["shutdown", "-h", "now"])
+        .spawn()
+    {
+        Ok(_) => HttpResponse::Ok().body("Shutdown command sent"),
+        Err(e) => {
+            eprintln!("Failed to shutdown: {}", e);
+            let _ = data.event_sender.send(format!("Failed to shutdown: {}", e));
+            HttpResponse::InternalServerError().body(format!("Failed to shutdown: {}", e))
+        }
+    }
+}
+
+#[post("/reboot")]
+async fn handle_reboot(data: web::Data<AppState>) -> impl Responder {
+    println!("Received Reboot request");
+    let _ = data.event_sender.send("Rebooting Raspberry Pi...".to_string());
+
+    // Give a moment for the SSE message to be sent
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    match std::process::Command::new("sudo")
+        .args(&["reboot"])
+        .spawn()
+    {
+        Ok(_) => HttpResponse::Ok().body("Reboot command sent"),
+        Err(e) => {
+            eprintln!("Failed to reboot: {}", e);
+            let _ = data.event_sender.send(format!("Failed to reboot: {}", e));
+            HttpResponse::InternalServerError().body(format!("Failed to reboot: {}", e))
+        }
+    }
 }
 
 #[post("/restart_indi")]
@@ -874,6 +914,8 @@ async fn main() -> std::io::Result<()> {
             .service(update_location)
             .service(update_time)
             .service(handle_restart_indi)
+            .service(handle_shutdown)
+            .service(handle_reboot)
     })
     .bind(("0.0.0.0", 8080))?
     .run()
