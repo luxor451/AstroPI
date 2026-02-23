@@ -52,6 +52,7 @@ struct AppState {
 struct GoToPayload {
     ra: String,
     dec: String,
+    closed_loop: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -73,7 +74,7 @@ struct LocationPayload {
 #[derive(Deserialize)]
 struct CameraSettingsPayload {
     iso: String,
-    platesolving_exposure: String,
+    platesolvingExposure: String,
 }
 
 #[get("/location")]
@@ -438,12 +439,14 @@ async fn handle_goto(payload: web::Json<GoToPayload>, data: web::Data<AppState>)
     // Cast ra parts to i64 as required by make_initial_guess
     let target = make_initial_guess(ra.0 as i64, ra.1 as i64, ra.2, dec.0, dec.1, dec.2);
 
+    let use_closed_loop = payload.closed_loop.unwrap_or(false);
+
     let result = goto_closed_loop(
         &client,
         camera,
         platesolve_settings,
         target,
-        false,
+        use_closed_loop,
         &data.event_sender,
         &data.is_running,
     )
@@ -471,7 +474,7 @@ async fn handle_update_camera_settings(
     let mut settings = data.camera_settings.lock().await;
 
     settings.iso = payload.iso.parse().unwrap_or(800);
-    settings.platesolving_exposure = payload.platesolving_exposure.parse().unwrap_or(2.0);
+    settings.platesolving_exposure = payload.platesolvingExposure.parse().unwrap_or(2.0);
 
     println!("Updated settings: ISO={}, Plate Expose={}", settings.iso, settings.platesolving_exposure);
     let _ = data.event_sender.send(format!("Camera settings updated: ISO={}, Plate Expose={}", settings.iso, settings.platesolving_exposure));
