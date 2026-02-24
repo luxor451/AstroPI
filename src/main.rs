@@ -34,7 +34,7 @@ struct CameraGlobalSettings {
 impl Default for CameraGlobalSettings {
     fn default() -> Self {
         Self {
-            iso: 800,
+            iso: 1600,
             platesolving_exposure: 2.0,
             pixel_size_micron: 6.0,
             focal_length_mm: 714.0,
@@ -54,6 +54,78 @@ impl CameraGlobalSettings {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct SequenceOptions {
+    park_after: bool,
+    shutdown_after: bool,
+    meridian_flip: bool,
+    post_meridian_limit_h: String,
+    subfolder: String,
+}
+
+impl Default for SequenceOptions {
+    fn default() -> Self {
+        Self {
+            park_after: false,
+            shutdown_after: false,
+            meridian_flip: false,
+            post_meridian_limit_h: "0.1".to_string(),
+            subfolder: String::new(),
+        }
+    }
+}
+
+// ── Sequence state persistence (mirrors frontend types) ──────────────
+
+#[derive(Serialize, Deserialize, Clone)]
+struct SequenceItemBackend {
+    id: String,
+    #[serde(rename = "type")]
+    item_type: String,
+    exposure: String,
+    count: String,
+    #[serde(rename = "targetName")]
+    target_name: String,
+    #[serde(rename = "targetRaDeg")]
+    target_ra_deg: f64,
+    #[serde(rename = "targetDecDeg")]
+    target_dec_deg: f64,
+    #[serde(rename = "skipGoto")]
+    skip_goto: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct SequenceProgress {
+    current: u32,
+    total: u32,
+    msg: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct BackendSequenceState {
+    plan: Vec<SequenceItemBackend>,
+    status: String,
+    progress: Option<SequenceProgress>,
+}
+
+impl Default for BackendSequenceState {
+    fn default() -> Self {
+        Self {
+            plan: vec![],
+            status: "idle".to_string(),
+            progress: None,
+        }
+    }
+}
+
+/// Partial update struct – only the fields the frontend sends.
+#[derive(Deserialize)]
+struct SequenceStateUpdate {
+    plan: Option<Vec<SequenceItemBackend>>,
+    status: Option<String>,
+    progress: Option<SequenceProgress>,
+}
+
 struct AppState {
     indi_client: RwLock<Option<eqmod_communication::IndiClient>>,
     camera: Mutex<Option<CameraController>>,
@@ -62,6 +134,9 @@ struct AppState {
     location: Mutex<Location>,
     indi_server_process: Mutex<Option<std::process::Child>>,
     camera_settings: Mutex<CameraGlobalSettings>,
+    closed_loop: Mutex<bool>,
+    sequence_options: Mutex<SequenceOptions>,
+    sequence_state: Mutex<BackendSequenceState>,
     should_pause: Arc<AtomicBool>,
     /// Active meridian-flip configuration (set when a sequence with flip is running).
     active_flip_config: Mutex<Option<MeridianFlipConfig>>,
@@ -75,20 +150,38 @@ struct GoToPayload {
 }
 
 #[derive(Deserialize)]
-struct StartSequencePayload {
-    sequence: Vec<SequenceItem>,
+struct SequenceGroup {
+    /// Display / folder name for this target.
     target: String,
+    /// Capture items (light, dark, etc.) for this group.
+    sequence: Vec<SequenceItem>,
+    /// Target RA in "HH:MM:SS" format (for GoTo & meridian flip).
+    ra: Option<String>,
+    /// Target Dec in "DD:MM:SS" format (for GoTo & meridian flip).
+    dec: Option<String>,
+    /// If true, skip GoTo for this group.
+    skip_goto: Option<bool>,
+    /// If true, this is a Park-only group (no captures).
+    park: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct StartSequencePayload {
+    /// Ordered list of target groups to execute sequentially.
+    groups: Vec<SequenceGroup>,
     date: String,
     resume_from: Option<u32>,
     subfolder: Option<String>,
-    /// Target RA in "HH:MM:SS" format (needed for meridian flip).
-    ra: Option<String>,
-    /// Target Dec in "DD:MM:SS" format (needed for meridian flip).
-    dec: Option<String>,
     /// Enable automatic meridian-flip detection during the sequence.
     meridian_flip: Option<bool>,
     /// How many hours past the meridian to wait before flipping (default: 0.1 ≈ 6 min).
     post_meridian_limit_h: Option<f64>,
+    /// Park the mount after all groups complete.
+    park_after: Option<bool>,
+    /// Shut down the Raspberry Pi after all groups (and optional park) complete.
+    shutdown_after: Option<bool>,
+    /// Use closed-loop (plate-solve) GoTo.
+    closed_loop: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -296,6 +389,12 @@ async fn handle_stop(data: web::Data<AppState>) -> impl Responder {
     println!("Received Stop request");
     let _ = data.event_sender.send("Received Stop request".to_string());
     data.is_running.store(false, Ordering::Relaxed);
+    // Eagerly mark sequence as idle so reconnecting clients see the stop
+    {
+        let mut ss = data.sequence_state.lock().await;
+        ss.status = "idle".to_string();
+        ss.progress = None;
+    }
     HttpResponse::Ok().body("Stop signal sent")
 }
 
@@ -304,6 +403,11 @@ async fn handle_pause(data: web::Data<AppState>) -> impl Responder {
     println!("Received Pause request");
     let _ = data.event_sender.send("Received Pause request".to_string());
     data.should_pause.store(true, Ordering::Relaxed);
+    // Eagerly mark sequence as paused
+    {
+        let mut ss = data.sequence_state.lock().await;
+        ss.status = "paused".to_string();
+    }
     HttpResponse::Ok().body("Pause signal sent")
 }
 
@@ -399,10 +503,7 @@ async fn handle_goto(payload: web::Json<GoToPayload>, data: web::Data<AppState>)
         payload.ra, payload.dec
     ));
 
-    // DEBUG: print to verify execution flow
-    println!("Processing GoTo request...");
 
-    // Set running flag
     data.is_running.store(true, Ordering::Relaxed);
 
     let client = {
@@ -507,8 +608,8 @@ async fn handle_update_camera_settings(
 ) -> impl Responder {
     let mut settings = data.camera_settings.lock().await;
 
-    settings.iso = payload.iso.parse().unwrap_or(800);
-    settings.platesolving_exposure = payload.platesolving_exposure.parse().unwrap_or(2.0);
+    settings.iso = payload.iso.parse().unwrap_or(settings.iso);
+    settings.platesolving_exposure = payload.platesolving_exposure.parse().unwrap_or(settings.platesolving_exposure);
 
     if let Some(ref v) = payload.pixel_size_micron {
         settings.pixel_size_micron = v.parse().unwrap_or(settings.pixel_size_micron);
@@ -537,13 +638,15 @@ async fn handle_start_sequence(
     payload: web::Json<StartSequencePayload>,
     data: web::Data<AppState>,
 ) -> impl Responder {
-    println!("Received Start Sequence request");
+    println!("Received Start Sequence request ({} group(s))", payload.groups.len());
     let _ = data
         .event_sender
-        .send("Received Start Sequence request".to_string());
+        .send(format!("Received Start Sequence request ({} group(s))", payload.groups.len()));
 
     let settings_guard = data.camera_settings.lock().await;
     let iso = settings_guard.iso;
+    let platesolving_exposure = settings_guard.platesolving_exposure;
+    let cam_config = settings_guard.to_camera_config();
     drop(settings_guard);
 
     let capture_settings = CaptureSettings {
@@ -560,132 +663,300 @@ async fn handle_start_sequence(
     let data_clone = data.clone();
     let payload = payload.into_inner();
     let resume_idx = payload.resume_from.unwrap_or(0);
+    let use_closed_loop = payload.closed_loop.unwrap_or(false);
 
-    // Build optional meridian-flip configuration
-    let flip_config: Option<MeridianFlipConfig> = if payload.meridian_flip.unwrap_or(false) {
-        // We need RA, Dec and the observatory longitude.
-        let parse_hms = |s: &str| -> Option<f64> {
-            let p: Vec<&str> = s.trim().split(':').collect();
-            if p.len() != 3 { return None; }
-            let h: f64 = p[0].parse().ok()?;
-            let m: f64 = p[1].parse().ok()?;
-            let s: f64 = p[2].parse().ok()?;
-            Some(h + m / 60.0 + s / 3600.0)
-        };
-        let parse_dms = |s: &str| -> Option<f64> {
-            let p: Vec<&str> = s.trim().split(':').collect();
-            if p.len() != 3 { return None; }
-            let d: f64 = p[0].parse().ok()?;
-            let m: f64 = p[1].parse().ok()?;
-            let s: f64 = p[2].parse().ok()?;
-            let sign = if d < 0.0 { -1.0 } else { 1.0 };
-            Some(sign * (d.abs() + m / 60.0 + s / 3600.0))
-        };
-
-        let ra_h = payload.ra.as_deref().and_then(parse_hms);
-        let dec_deg = payload.dec.as_deref().and_then(parse_dms);
-
-        match (ra_h, dec_deg) {
-            (Some(ra), Some(dec)) => {
-                let longitude = {
-                    let loc = data.location.lock().await;
-                    loc.longitude
-                };
-                Some(MeridianFlipConfig {
-                    longitude_deg: longitude,
-                    target_ra_h: ra,
-                    target_dec_deg: dec,
-                    post_meridian_limit_h: payload.post_meridian_limit_h.unwrap_or(0.1),
-                })
-            }
-            _ => {
-                let _ = data.event_sender.send(
-                    "Meridian flip requested but RA/Dec missing or invalid in payload. Flip disabled.".to_string(),
-                );
-                None
-            }
-        }
-    } else {
-        None
+    // Helper closures for RA/Dec parsing (used per-group)
+    let parse_hms = |s: &str| -> Option<f64> {
+        let p: Vec<&str> = s.trim().split(':').collect();
+        if p.len() != 3 { return None; }
+        let h: f64 = p[0].parse().ok()?;
+        let m: f64 = p[1].parse().ok()?;
+        let s: f64 = p[2].parse().ok()?;
+        Some(h + m / 60.0 + s / 3600.0)
+    };
+    let parse_dms = |s: &str| -> Option<f64> {
+        let p: Vec<&str> = s.trim().split(':').collect();
+        if p.len() != 3 { return None; }
+        let d: f64 = p[0].parse().ok()?;
+        let m: f64 = p[1].parse().ok()?;
+        let s: f64 = p[2].parse().ok()?;
+        let sign = if d < 0.0 { -1.0 } else { 1.0 };
+        Some(sign * (d.abs() + m / 60.0 + s / 3600.0))
+    };
+    let parse_time_tuple = |s: &str| -> Option<(u8, u8, f64)> {
+        let parts: Vec<&str> = s.trim().split(':').collect();
+        if parts.len() != 3 { return None; }
+        Some((parts[0].parse().ok()?, parts[1].parse().ok()?, parts[2].parse().ok()?))
+    };
+    let parse_dec_tuple = |s: &str| -> Option<(i64, i64, f64)> {
+        let parts: Vec<&str> = s.trim().split(':').collect();
+        if parts.len() != 3 { return None; }
+        Some((parts[0].parse().ok()?, parts[1].parse().ok()?, parts[2].parse().ok()?))
     };
 
-    // Store the active flip config so /status can read it.
-    {
-        let mut afc = data.active_flip_config.lock().await;
-        *afc = flip_config.clone();
-    }
-
     tokio::spawn(async move {
-        // Send a starting message immediately from the task, before acquiring camera lock
-        // This ensures the frontend gets feedback even if waiting for the lock
-        let start_msg = format!("Starting sequence (resuming from {})...", resume_idx);
+        // Mark sequence as running in persisted state
+        {
+            let mut ss = data_clone.sequence_state.lock().await;
+            ss.status = "running".to_string();
+            ss.progress = None;
+        }
+
+        // Subscribe to broadcast channel to track PROGRESS messages
+        let mut progress_rx = data_clone.event_sender.subscribe();
+        let data_for_progress = data_clone.clone();
+        let progress_tracker = tokio::spawn(async move {
+            loop {
+                match progress_rx.recv().await {
+                    Ok(msg) if msg.starts_with("PROGRESS:") => {
+                        let rest = &msg["PROGRESS:".len()..];
+                        if let Some(colon_pos) = rest.find(':') {
+                            let counts_part = &rest[..colon_pos];
+                            let msg_part = &rest[colon_pos + 1..];
+                            let parts: Vec<&str> = counts_part.split('/').collect();
+                            if parts.len() == 2 {
+                                if let (Ok(current), Ok(total)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                                    let mut ss = data_for_progress.sequence_state.lock().await;
+                                    ss.progress = Some(SequenceProgress { current, total, msg: msg_part.to_string() });
+                                }
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    _ => {}
+                }
+            }
+        });
+
+        let start_msg = format!("Starting sequence ({} group(s), resuming from {})...", payload.groups.len(), resume_idx);
         println!("{}", start_msg);
         let _ = data_clone.event_sender.send(start_msg);
 
         let camera_opt = data_clone.camera.lock().await;
-        
         let camera = match camera_opt.as_ref() {
             Some(c) => c,
             None => {
                 let msg = "Camera not connected, cannot start sequence.".to_string();
                 eprintln!("{}", msg);
                 let _ = data_clone.event_sender.send(msg);
+                progress_tracker.abort();
+                let mut ss = data_clone.sequence_state.lock().await;
+                ss.status = "idle".to_string();
                 return;
             }
         };
 
-        // Obtain an INDI client reference for meridian-flip support.
-        // We acquire a read-lock here; it is held for the duration of the
-        // sequence but does NOT block concurrent reads (status, etc.).
         let client_guard = data_clone.indi_client.read().await;
         let indi_ref = client_guard.as_ref();
 
-        match run_sequence(
-            camera,
-            &capture_settings,
-            &payload.sequence,
-            &payload.target,
-            &payload.date,
-            payload.subfolder.clone(),
-            resume_idx,
-            &data_clone.event_sender,
-            &data_clone.is_running,
-            &data_clone.should_pause,
-            indi_ref,
-            flip_config.as_ref(),
-        ).await {
-            Ok(_) => {
-                // If paused or cancelled, don't say "Sequence complete!" as run_sequence handles its own messages
-                let is_still_running = data_clone.is_running.load(Ordering::Relaxed);
-                let is_paused = data_clone.should_pause.load(Ordering::Relaxed);
-                
-                if is_still_running && !is_paused {
-                    let msg = "Sequence complete!".to_string();
-                    println!("{}", msg);
-                    let _ = data_clone.event_sender.send(msg);
+        let mut all_ok = true;
+        let num_groups = payload.groups.len();
+
+        for (group_idx, group) in payload.groups.iter().enumerate() {
+            // Check if stopped/paused between groups
+            if !data_clone.is_running.load(Ordering::Relaxed) {
+                let _ = data_clone.event_sender.send("Sequence stopped between groups.".to_string());
+                all_ok = false;
+                break;
+            }
+
+            // --- Park-only group ---
+            if group.park.unwrap_or(false) {
+                let _ = data_clone.event_sender.send("Parking mount (sequence group)...".to_string());
+                if let Some(client) = indi_ref {
+                    if let Err(e) = client.park().await {
+                        let msg = format!("Park failed during sequence: {}", e);
+                        eprintln!("{}", msg);
+                        let _ = data_clone.event_sender.send(msg);
+                        all_ok = false;
+                        break;
+                    }
+                    let _ = data_clone.event_sender.send("Mount parked.".to_string());
                 }
-            },
-            Err(e) => {
-                let msg = format!("Plan failed: {}", e);
-                eprintln!("{}", msg);
-                let _ = data_clone.event_sender.send(msg);
+                continue;
+            }
+
+            // --- GoTo (unless skipped) ---
+            if !group.skip_goto.unwrap_or(false) {
+                if let (Some(ra_str), Some(dec_str)) = (group.ra.as_deref(), group.dec.as_deref()) {
+                    let _ = data_clone.event_sender.send(
+                        format!("Group {}/{}: Slewing to {}...", group_idx + 1, num_groups, group.target)
+                    );
+
+                    let ra_parsed = parse_time_tuple(ra_str);
+                    let dec_parsed = parse_dec_tuple(dec_str);
+
+                    match (ra_parsed, dec_parsed) {
+                        (Some(ra), Some(dec)) => {
+                            let target = make_initial_guess(
+                                ra.0 as i64, ra.1 as i64, ra.2,
+                                dec.0, dec.1, dec.2,
+                            );
+                            let platesolve_settings = CaptureSettings {
+                                iso,
+                                aperture: None,
+                                exposure_seconds: platesolving_exposure as u64,
+                                save_directory: PathBuf::from("imgs/goto/captures"),
+                            };
+                            let goto_result = goto_closed_loop(
+                                indi_ref.unwrap(),
+                                Some(camera),
+                                platesolve_settings,
+                                target,
+                                use_closed_loop,
+                                &data_clone.event_sender,
+                                &data_clone.is_running,
+                                &cam_config,
+                            ).await;
+                            if let Err(e) = goto_result {
+                                let msg = format!("GoTo failed for {}: {}", group.target, e);
+                                eprintln!("{}", msg);
+                                let _ = data_clone.event_sender.send(msg);
+                                all_ok = false;
+                                break;
+                            }
+                        }
+                        _ => {
+                            let msg = format!("Invalid RA/Dec for group {}, skipping GoTo.", group.target);
+                            let _ = data_clone.event_sender.send(msg);
+                        }
+                    }
+                }
+            }
+
+            // --- Build per-group meridian-flip config ---
+            let flip_config: Option<MeridianFlipConfig> = if payload.meridian_flip.unwrap_or(false) {
+                let ra_h = group.ra.as_deref().and_then(|s| parse_hms(s));
+                let dec_deg = group.dec.as_deref().and_then(|s| parse_dms(s));
+                match (ra_h, dec_deg) {
+                    (Some(ra), Some(dec)) => {
+                        let longitude = {
+                            let loc = data_clone.location.lock().await;
+                            loc.longitude
+                        };
+                        Some(MeridianFlipConfig {
+                            longitude_deg: longitude,
+                            target_ra_h: ra,
+                            target_dec_deg: dec,
+                            post_meridian_limit_h: payload.post_meridian_limit_h.unwrap_or(0.1),
+                        })
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            // Store the active flip config so /status can read it.
+            {
+                let mut afc = data_clone.active_flip_config.lock().await;
+                *afc = flip_config.clone();
+            }
+
+            // --- Run captures for this group ---
+            let group_resume = if group_idx == 0 { resume_idx } else { 0 };
+            let _ = data_clone.event_sender.send(
+                format!("Group {}/{}: Capturing {} for {}...", group_idx + 1, num_groups,
+                    group.sequence.iter().map(|s| s.count).sum::<u32>(),
+                    group.target)
+            );
+
+            let seq_result = run_sequence(
+                camera,
+                &capture_settings,
+                &group.sequence,
+                &group.target,
+                &payload.date,
+                payload.subfolder.clone(),
+                group_resume,
+                &data_clone.event_sender,
+                &data_clone.is_running,
+                &data_clone.should_pause,
+                indi_ref,
+                flip_config.as_ref(),
+            ).await.map_err(|e| e.to_string());
+
+            match seq_result {
+                Ok(_) => {
+                    let is_still_running = data_clone.is_running.load(Ordering::Relaxed);
+                    let is_paused = data_clone.should_pause.load(Ordering::Relaxed);
+
+                    if !is_still_running || is_paused {
+                        // Stopped or paused mid-group
+                        all_ok = false;
+                        break;
+                    }
+
+                    if group_idx < num_groups - 1 {
+                        let msg = format!("Group {}/{} complete ({}).", group_idx + 1, num_groups, group.target);
+                        println!("{}", msg);
+                        let _ = data_clone.event_sender.send(msg);
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("Plan failed for {}: {}", group.target, e);
+                    eprintln!("{}", msg);
+                    let _ = data_clone.event_sender.send(msg);
+                    all_ok = false;
+                    break;
+                }
             }
         }
-        
-        // Reset running state when sequence finishes (unless paused, where we might want to resume?)
-        // For now, if paused, we keep is_running true so frontend sees it as active? 
-        // No, current logic is simple pause stops the loop in run_sequence but keeps state?
-        // Actually run_sequence returns on pause. So loop exits.
-        // If we want to resume, we need to handle that. But for now let's just fix the message.
-        if !data_clone.should_pause.load(Ordering::Relaxed) {
-             data_clone.is_running.store(false, Ordering::Relaxed);
-        } else {
-             data_clone.is_running.store(false, Ordering::Relaxed);
+
+        // --- Final status ---
+        let is_paused = data_clone.should_pause.load(Ordering::Relaxed);
+        if all_ok && !is_paused {
+            let msg = "Sequence complete!".to_string();
+            println!("{}", msg);
+            let _ = data_clone.event_sender.send(msg);
         }
-        // Clear active flip config when sequence ends.
+
+        // Update persisted state
+        {
+            let mut ss = data_clone.sequence_state.lock().await;
+            if is_paused {
+                ss.status = "paused".to_string();
+            } else {
+                ss.status = "idle".to_string();
+                ss.progress = None;
+            }
+        }
+
+        // Stop the progress tracking task
+        progress_tracker.abort();
+
+        // Reset running state
+        data_clone.is_running.store(false, Ordering::Relaxed);
+
+        // Clear active flip config
         {
             let mut afc = data_clone.active_flip_config.lock().await;
             *afc = None;
+        }
+
+        // --- Post-sequence actions (park / shutdown) ---
+        if all_ok && !is_paused {
+            if payload.park_after.unwrap_or(false) {
+                let _ = data_clone.event_sender.send("Parking mount after sequence...".to_string());
+                let client_opt = data_clone.indi_client.read().await;
+                if let Some(client) = client_opt.as_ref() {
+                    if let Err(e) = client.park().await {
+                        let msg = format!("Post-sequence park failed: {}", e);
+                        eprintln!("{}", msg);
+                        let _ = data_clone.event_sender.send(msg);
+                    } else {
+                        let _ = data_clone.event_sender.send("Mount parked after sequence.".to_string());
+                    }
+                }
+            }
+
+            if payload.shutdown_after.unwrap_or(false) {
+                let _ = data_clone.event_sender.send("Shutting down after sequence...".to_string());
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let _ = std::process::Command::new("sudo")
+                    .args(&["shutdown", "-h", "now"])
+                    .spawn();
+            }
         }
     });
 
@@ -1030,6 +1301,94 @@ struct StatusResponse {
     time_to_flip_minutes: Option<f64>,
 }
 
+// ── Settings endpoints ────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct SettingsResponse {
+    camera_settings: CameraGlobalSettings,
+    closed_loop: bool,
+    observer_location: Location,
+    sequence_options: SequenceOptions,
+    sequence_state: BackendSequenceState,
+}
+
+#[derive(Deserialize)]
+struct SettingsUpdate {
+    camera_settings: Option<CameraGlobalSettings>,
+    closed_loop: Option<bool>,
+    observer_location: Option<Location>,
+    sequence_options: Option<SequenceOptions>,
+    sequence_state: Option<SequenceStateUpdate>,
+}
+
+#[get("/settings")]
+async fn get_settings(data: web::Data<AppState>) -> impl Responder {
+    let cam = data.camera_settings.lock().await.clone();
+    let cl = *data.closed_loop.lock().await;
+    let loc = data.location.lock().await.clone();
+    let seq = data.sequence_options.lock().await.clone();
+    let ss = data.sequence_state.lock().await.clone();
+
+    HttpResponse::Ok().json(SettingsResponse {
+        camera_settings: cam,
+        closed_loop: cl,
+        observer_location: loc,
+        sequence_options: seq,
+        sequence_state: ss,
+    })
+}
+
+#[post("/settings")]
+async fn update_settings(
+    payload: web::Json<SettingsUpdate>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    if let Some(ref cs) = payload.camera_settings {
+        let mut settings = data.camera_settings.lock().await;
+        *settings = cs.clone();
+    }
+    if let Some(cl) = payload.closed_loop {
+        let mut closed = data.closed_loop.lock().await;
+        *closed = cl;
+    }
+    if let Some(ref loc) = payload.observer_location {
+        let mut location = data.location.lock().await;
+        location.latitude = loc.latitude;
+        location.longitude = loc.longitude;
+        location.elevation = loc.elevation;
+
+        // Push to EQMod if connected
+        let client_opt = data.indi_client.read().await;
+        if let Some(client) = client_opt.as_ref() {
+            if let Err(e) = client
+                .set_location(loc.latitude, loc.longitude, loc.elevation)
+                .await
+            {
+                eprintln!("Failed to update location on EQMod: {}", e);
+            }
+        }
+    }
+    if let Some(ref so) = payload.sequence_options {
+        let mut opts = data.sequence_options.lock().await;
+        *opts = so.clone();
+    }
+    if let Some(ref su) = payload.sequence_state {
+        let mut ss = data.sequence_state.lock().await;
+        if let Some(ref plan) = su.plan {
+            ss.plan = plan.clone();
+        }
+        if let Some(ref status) = su.status {
+            ss.status = status.clone();
+        }
+        if let Some(ref progress) = su.progress {
+            ss.progress = Some(progress.clone());
+        }
+    }
+
+    let _ = data.event_sender.send("Settings updated.".to_string());
+    HttpResponse::Ok().body("Settings updated")
+}
+
 #[get("/ping")]
 async fn ping() -> impl Responder {
     HttpResponse::Ok().body("pong")
@@ -1145,6 +1504,9 @@ async fn main() -> std::io::Result<()> {
         }),
         indi_server_process: Mutex::new(Some(indi_process)),
         camera_settings: Mutex::new(CameraGlobalSettings::default()),
+        closed_loop: Mutex::new(false),
+        sequence_options: Mutex::new(SequenceOptions::default()),
+        sequence_state: Mutex::new(BackendSequenceState::default()),
         should_pause: Arc::new(AtomicBool::new(false)),
         active_flip_config: Mutex::new(None),
     });
@@ -1180,6 +1542,8 @@ async fn main() -> std::io::Result<()> {
             .service(handle_restart_indi)
             .service(handle_shutdown)
             .service(handle_reboot)
+            .service(get_settings)
+            .service(update_settings)
     })
     .bind(("0.0.0.0", 8080))?
     .run()
