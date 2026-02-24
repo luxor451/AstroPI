@@ -12,7 +12,7 @@ use tokio::sync::broadcast::Sender;
 
 use astro_pi_plate_solving::{
     solve_plate_with_options, Arcdegrees, CoordinateEquatorial, PlateSolvingResult, RaHoursMinutesSeconds,
-    CameraConfig,
+    CameraConfig, cr3_to_png,
 };
 use camera_control::CameraController;
 use eqmod_communication::IndiClient;
@@ -364,6 +364,17 @@ pub async fn run_sequence(
                     let _ = sender.send(format!("Warning: Failed to rename file: {}", e));
                 } else {
                     println!("Saved to {}", new_path.display());
+
+                    // Convert captured image to JPEG for live preview on the main page
+                    let seq_preview_path = PathBuf::from("imgs/sequence_latest.jpg");
+                    match cr3_to_png(&new_path, &seq_preview_path) {
+                        Ok(_) => {
+                            let _ = sender.send("SEQ_IMAGE_READY".to_string());
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to convert sequence image for preview: {}", e);
+                        }
+                    }
                 }
             }
             

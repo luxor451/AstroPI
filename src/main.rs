@@ -798,22 +798,27 @@ async fn handle_start_sequence(
                                 exposure_seconds: platesolving_exposure as u64,
                                 save_directory: PathBuf::from("imgs/goto/captures"),
                             };
-                            let goto_result = goto_closed_loop(
-                                indi_ref.unwrap(),
-                                Some(camera),
-                                platesolve_settings,
-                                target,
-                                use_closed_loop,
-                                &data_clone.event_sender,
-                                &data_clone.is_running,
-                                &cam_config,
-                            ).await;
-                            if let Err(e) = goto_result {
-                                let msg = format!("GoTo failed for {}: {}", group.target, e);
-                                eprintln!("{}", msg);
+                            if let Some(indi) = indi_ref {
+                                let goto_result = goto_closed_loop(
+                                    indi,
+                                    Some(camera),
+                                    platesolve_settings,
+                                    target,
+                                    use_closed_loop,
+                                    &data_clone.event_sender,
+                                    &data_clone.is_running,
+                                    &cam_config,
+                                ).await;
+                                if let Err(e) = goto_result {
+                                    let msg = format!("GoTo failed for {}: {}", group.target, e);
+                                    eprintln!("{}", msg);
+                                    let _ = data_clone.event_sender.send(msg);
+                                    all_ok = false;
+                                    break;
+                                }
+                            } else {
+                                let msg = "Mount not connected, skipping GoTo.".to_string();
                                 let _ = data_clone.event_sender.send(msg);
-                                all_ok = false;
-                                break;
                             }
                         }
                         _ => {
@@ -1389,6 +1394,15 @@ async fn update_settings(
     HttpResponse::Ok().body("Settings updated")
 }
 
+#[get("/sequence_preview")]
+async fn get_sequence_preview() -> impl Responder {
+    let path = PathBuf::from("imgs/sequence_latest.jpg");
+    match std::fs::read(&path) {
+        Ok(bytes) => HttpResponse::Ok().content_type("image/jpeg").body(bytes),
+        Err(_) => HttpResponse::NotFound().body("No sequence preview available"),
+    }
+}
+
 #[get("/ping")]
 async fn ping() -> impl Responder {
     HttpResponse::Ok().body("pong")
@@ -1535,6 +1549,7 @@ async fn main() -> std::io::Result<()> {
             .service(sse_events)
             .service(handle_status)
             .service(take_preview)
+            .service(get_sequence_preview)
             .service(ping)
             .service(get_location)
             .service(update_location)
