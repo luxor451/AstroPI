@@ -434,6 +434,42 @@ impl IndiClient {
         Ok(())
     }
 
+    /// Sync the mount's internal position to the given coordinates.
+    ///
+    /// This tells the mount "you are actually pointing at (ra, dec)" so that
+    /// subsequent GOTO commands use a corrected model.  Typically called after
+    /// a successful plate solve.
+    ///
+    /// The method temporarily switches `ON_COORD_SET` to SYNC, sends the
+    /// coordinates, then restores TRACK mode.
+    pub async fn sync(&self, ra: f64, dec: f64) -> Result<()> {
+        assert!(ra >= 0.0 && ra <= 24.0, "RA must be between 0 and 24 hours");
+        assert!(dec >= -90.0 && dec <= 90.0, "DEC must be between -90 and +90 degrees");
+
+        // Switch to SYNC mode
+        self.send_switch("ON_COORD_SET", &[
+            ("TRACK", false),
+            ("SLEW", false),
+            ("SYNC", true),
+        ]).await?;
+
+        // Send solved coordinates – the mount will update its internal state
+        self.send_numbers("EQUATORIAL_EOD_COORD", &[("RA", ra), ("DEC", dec)]).await?;
+
+        // Small delay to let the mount process the sync
+        sleep(Duration::from_millis(300)).await;
+
+        // Restore TRACK mode for future GOTO commands
+        self.send_switch("ON_COORD_SET", &[
+            ("TRACK", true),
+            ("SLEW", false),
+            ("SYNC", false),
+        ]).await?;
+
+        println!("DEBUG: Synced mount to RA={:.6}h, DEC={:.6}°", ra, dec);
+        Ok(())
+    }
+
     /// Abort the current slew/motion
     pub async fn abort_motion(&self) -> Result<()> {
         println!("DEBUG: Sending TELESCOPE_ABORT_MOTION...");

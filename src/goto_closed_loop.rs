@@ -84,7 +84,7 @@ pub async fn goto_closed_loop(
     };
 
     let _ = sender.send("Waiting for mount to settle...".to_string());
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Wait for the mount to stop moving
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await; // Wait for the mount to stop moving
 
     // Check before capture
     if !is_running.load(std::sync::atomic::Ordering::Relaxed) {
@@ -103,9 +103,19 @@ pub async fn goto_closed_loop(
     let solved_ra = solved_coordinate.ra.to_hours();
     let solved_dec = solved_coordinate.dec.to_degrees();
 
+
+    // Sync the mount's internal position with the plate-solved coordinates
+    println!("DEBUG: Syncing mount with solved coordinates - RA: {:.4}h, Dec: {:.4}°", solved_ra, solved_dec);
+    if let Err(e) = client.sync(solved_ra, solved_dec).await {
+        let msg = format!("Warning: sync failed: {}", e);
+        eprintln!("{}", msg);
+        let _ = sender.send(msg);
+    }
+
     let diff_ra_h = target_ra - solved_ra;
     let diff_dec_deg = target_dec - solved_dec;
 
+  
     let mut distance_arcsec = (diff_ra_h * 15.0).hypot(diff_dec_deg) * 3600.0;
 
     let msg = format!("Initial position error: {:.2} arcsec.", distance_arcsec);
@@ -138,7 +148,7 @@ pub async fn goto_closed_loop(
             .await?;
 
         let _ = sender.send("Waiting for mount to settle...".to_string());
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Wait for the mount to stop moving
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await; // Wait for the mount to stop moving
 
         if !is_running.load(std::sync::atomic::Ordering::Relaxed) {
              let _ = sender.send("Goto aborted by user.".to_string());
@@ -160,6 +170,14 @@ pub async fn goto_closed_loop(
 
         let solved_ra_iter = solved_coordinate.ra.to_hours();
         let solved_dec_iter = solved_coordinate.dec.to_degrees();
+
+        // Sync the mount's internal position with the plate-solved coordinates
+        println!("DEBUG: Syncing mount with solved coordinates - RA: {:.4}h, Dec: {:.4}°", solved_ra_iter, solved_dec_iter);
+        if let Err(e) = client.sync(solved_ra_iter, solved_dec_iter).await {
+            let msg = format!("Warning: sync failed: {}", e);
+            eprintln!("{}", msg);
+            let _ = sender.send(msg);
+        }
 
         println!("DEBUG: Iteration {} - Solved RA: {:.4}h, Dec: {:.4}°", i + 1, solved_ra_iter, solved_dec_iter);
 

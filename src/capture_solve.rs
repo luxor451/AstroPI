@@ -224,6 +224,10 @@ pub async fn run_sequence(
     }
     let mut current_global_idx = 0;
 
+    // Handle for the previous frame's background rename/convert task so we
+    // can await it before the sequence finishes (or on cancellation).
+    let mut prev_post_task: Option<tokio::task::JoinHandle<()>> = None;
+
     for item in sequence {
         // Check if stopped
         if !is_running.load(Ordering::Relaxed) {
@@ -354,33 +358,47 @@ pub async fn run_sequence(
                 return Ok(());
             }
 
-            // Rename file to include target and date
-            if let Some(ext) = path.extension() {
-                let ext_str = ext.to_string_lossy();
-                let new_filename = format!("{}_{}_{:04}.{}", target, date_str, current_global_idx, ext_str);
-                let new_path = current_save_dir.join(&new_filename);
-                if let Err(e) = std::fs::rename(&path, &new_path) {
-                    eprintln!("Failed to rename file: {}", e);
-                    let _ = sender.send(format!("Warning: Failed to rename file: {}", e));
-                } else {
-                    println!("Saved to {}", new_path.display());
+            // Spawn the rename + JPEG-conversion in the background so that
+            // the next exposure can start immediately (saves ~6 s per frame).
+            {
+                let sender_bg = sender.clone();
+                let path_bg = path.clone();
+                let save_dir_bg = current_save_dir.clone();
+                let target_bg = target.to_string();
+                let date_bg = date_str.to_string();
+                let idx = current_global_idx;
+                let total = total_count;
 
-                    // Convert captured image to JPEG for live preview on the main page
-                    let seq_preview_path = PathBuf::from("imgs/sequence_latest.jpg");
-                    match cr3_to_png(&new_path, &seq_preview_path) {
-                        Ok(_) => {
-                            let _ = sender.send("SEQ_IMAGE_READY".to_string());
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to convert sequence image for preview: {}", e);
+                prev_post_task = Some(tokio::task::spawn_blocking(move || {
+                    // Rename file to include target and date
+                    if let Some(ext) = path_bg.extension() {
+                        let ext_str = ext.to_string_lossy();
+                        let new_filename = format!("{}_{}_{:04}.{}", target_bg, date_bg, idx, ext_str);
+                        let new_path = save_dir_bg.join(&new_filename);
+                        if let Err(e) = std::fs::rename(&path_bg, &new_path) {
+                            eprintln!("Failed to rename file: {}", e);
+                            let _ = sender_bg.send(format!("Warning: Failed to rename file: {}", e));
+                        } else {
+                            println!("Saved to {}", new_path.display());
+
+                            // Convert captured image to JPEG for live preview
+                            let seq_preview_path = PathBuf::from("imgs/sequence_latest.jpg");
+                            match cr3_to_png(&new_path, &seq_preview_path) {
+                                Ok(_) => {
+                                    let _ = sender_bg.send("SEQ_IMAGE_READY".to_string());
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to convert sequence image for preview: {}", e);
+                                }
+                            }
                         }
                     }
-                }
+
+                    let msg_done = format!("Captured frame {}/{}", idx, total);
+                    println!("{}", msg_done);
+                    let _ = sender_bg.send(msg_done);
+                }));
             }
-            
-            let msg_done = format!("Captured frame {}/{}", current_global_idx, total_count);
-            println!("{}", msg_done);
-            let _ = sender.send(msg_done);
 
             // Check pause AFTER capture (so we can pause between frames)
             if should_pause.load(Ordering::Relaxed) {
@@ -392,6 +410,12 @@ pub async fn run_sequence(
         }
     }
 
+
+    // Wait for the last background rename/convert task to finish before
+    // announcing completion.
+    if let Some(task) = prev_post_task.take() {
+        let _ = task.await;
+    }
 
     let msg = format!(
         "Sequence complete! Captured {} frames total.",
