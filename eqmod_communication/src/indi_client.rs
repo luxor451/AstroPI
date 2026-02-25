@@ -196,6 +196,22 @@ impl IndiClient {
         let root = doc.root_element();
         let tag_name = root.tag_name().name();
 
+        // Handle delProperty — the driver removes properties (e.g. when parked)
+        if tag_name == "delProperty" {
+            let device = root.attribute("device").unwrap_or("unknown").to_string();
+            let name = root.attribute("name");
+            let mut state_lock = state.write().await;
+            if let Some(dev_props) = state_lock.devices.get_mut(&device) {
+                if let Some(prop_name) = name {
+                    dev_props.remove(prop_name);
+                } else {
+                    // No name → driver deleted ALL properties for this device
+                    dev_props.clear();
+                }
+            }
+            return Ok(());
+        }
+
         if tag_name == "message" {
              let device = root.attribute("device").unwrap_or("unknown");
              let message = root.attribute("message").unwrap_or("").to_string();
@@ -292,8 +308,13 @@ impl IndiClient {
             };
 
             if can_track {
-                 // Now enable tracking
+                // Unpark first — EQMod rejects tracking & motion while parked
+                self.unpark().await?;
+                sleep(Duration::from_millis(500)).await;
+
+                // Now enable tracking
                 self.send_switch("TELESCOPE_TRACK_STATE", &[("TRACK_ON", true), ("TRACK_OFF", false)]).await?;
+
                 return Ok(());
             } else {
                 println!("Waiting... ({}/10)", i+1);
@@ -470,6 +491,17 @@ impl IndiClient {
         Ok(())
     }
 
+    /// List all property names currently defined for this device.
+    /// Useful for debugging which properties the INDI driver has exposed.
+    pub async fn list_properties(&self) -> Vec<String> {
+        let state_lock = self.state.read().await;
+        if let Some(dev_props) = state_lock.devices.get(&self.device_name) {
+            dev_props.keys().cloned().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Abort the current slew/motion
     pub async fn abort_motion(&self) -> Result<()> {
         println!("DEBUG: Sending TELESCOPE_ABORT_MOTION...");
@@ -512,15 +544,15 @@ impl IndiClient {
 
     /// Set the slew rate for manual motion.
     ///
-    /// EQMod typically exposes a `TELESCOPE_SLEW_RATE` switch with numeric
-    /// indices `1x` … `MAX`.  The `rate_index` selects which one to turn on
-    /// (0-based).  Common mapping: 0 = 1x, 1 = 2x, 2 = 4x, … , 9 = MAX.
+    /// EQMod exposes a `TELESCOPE_SLEW_RATE` switch with labels `1x` … `9x`.
+    /// `rate_index` is 0-based (0 = 1x, 1 = 2x, … , 8 = 9x).
     pub async fn set_slew_rate(&self, rate_index: u8) -> Result<()> {
-        let labels = ["1x", "2x", "4x", "8x", "16x", "32x", "64x", "128x", "256x", "MAX"];
+        let labels = ["1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x", "9x"];
+        let idx = (rate_index as usize).min(labels.len() - 1);
         let switches: Vec<(&str, bool)> = labels
             .iter()
             .enumerate()
-            .map(|(i, &lbl)| (lbl, i == rate_index as usize))
+            .map(|(i, &lbl)| (lbl, i == idx))
             .collect();
         self.send_switch("TELESCOPE_SLEW_RATE", &switches).await
     }
@@ -814,6 +846,34 @@ impl IndiClient {
         }
 
         Ok(())
+    }
+
+    /// Wait until a property is defined in the INDI state for this device.
+    ///
+    /// Some properties (e.g. `TELESCOPE_SLEW_RATE`, `TELESCOPE_MOTION_NS`,
+    /// `TELESCOPE_MOTION_WE`) are defined asynchronously by the driver after
+    /// connection.  Sending a `newSwitchVector` before the corresponding
+    /// `defSwitchVector` arrives causes a "Property … is not defined" error.
+    #[allow(dead_code)]
+    async fn wait_for_property(&self, property: &str, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            {
+                let state = self.state.read().await;
+                if let Some(dev_props) = state.devices.get(&self.device_name) {
+                    if dev_props.contains_key(property) {
+                        return Ok(());
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(IndiError::Device(format!(
+                    "Timeout waiting for property '{}' to be defined on '{}'",
+                    property, self.device_name
+                )));
+            }
+            sleep(Duration::from_millis(250)).await;
+        }
     }
 
     /// Send a switch vector command

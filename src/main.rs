@@ -995,7 +995,7 @@ async fn handle_manual_move(
     // Optionally set slew rate before starting
     if start {
         if let Some(rate) = payload.rate {
-            if let Err(e) = client.set_slew_rate(rate.min(9)).await {
+            if let Err(e) = client.set_slew_rate(rate.min(8)).await {
                 eprintln!("Failed to set slew rate: {}", e);
             }
         }
