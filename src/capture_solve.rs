@@ -11,8 +11,8 @@ use tokio::sync::broadcast::Sender;
 // Removed chrono import plan as discussed, using string injection from payload
 
 use astro_pi_plate_solving::{
-    solve_plate_with_options, Arcdegrees, CoordinateEquatorial, PlateSolvingResult, RaHoursMinutesSeconds,
-    CameraConfig, cr3_to_png,
+    cr3_to_png, solve_plate_with_options, Arcdegrees, CameraConfig, CoordinateEquatorial,
+    PlateSolvingResult, RaHoursMinutesSeconds,
 };
 use camera_control::CameraController;
 use eqmod_communication::IndiClient;
@@ -113,13 +113,15 @@ pub async fn capture_and_solve(
 
     // Capture the image
     let capture_start = Instant::now();
-    let image_path = camera.take_photo(
-        settings.iso,
-        settings.aperture,
-        settings.exposure_seconds,
-        &settings.save_directory,
-        None, // No cancellation for single plate solve capture yet (or could pass one)
-    ).await?;
+    let image_path = camera
+        .take_photo(
+            settings.iso,
+            settings.aperture,
+            settings.exposure_seconds,
+            &settings.save_directory,
+            None, // No cancellation for single plate solve capture yet (or could pass one)
+        )
+        .await?;
     let capture_time = capture_start.elapsed();
 
     println!("Image captured: {}", image_path.display());
@@ -163,7 +165,13 @@ pub async fn capture_and_solve_quick(
     camera: &CameraController,
     initial_guess: &CoordinateEquatorial,
 ) -> Result<CaptureAndSolveResult, Box<dyn std::error::Error>> {
-    capture_and_solve(camera, initial_guess, &CaptureSettings::default(), &CameraConfig::default()).await
+    capture_and_solve(
+        camera,
+        initial_guess,
+        &CaptureSettings::default(),
+        &CameraConfig::default(),
+    )
+    .await
 }
 
 /// Create initial guess from RA (hours, minutes, seconds) and Dec (degrees, arcmin, arcsec)
@@ -231,18 +239,18 @@ pub async fn run_sequence(
     for item in sequence {
         // Check if stopped
         if !is_running.load(Ordering::Relaxed) {
-             let msg = "Plan cancelled manually.".to_string();
-             println!("{}", msg);
-             let _ = sender.send(msg);
-             return Ok(());
+            let msg = "Plan cancelled manually.".to_string();
+            println!("{}", msg);
+            let _ = sender.send(msg);
+            return Ok(());
         }
 
         // Check if paused (before starting new item type)
         if should_pause.load(Ordering::Relaxed) {
-             let msg = "Plan paused manually.".to_string();
-             println!("{}", msg);
-             let _ = sender.send(msg);
-             return Ok(());
+            let msg = "Plan paused manually.".to_string();
+            println!("{}", msg);
+            let _ = sender.send(msg);
+            return Ok(());
         }
 
         let type_name = match item.item_type {
@@ -265,7 +273,7 @@ pub async fn run_sequence(
         } else {
             item.exposure as u64
         };
-        
+
         for i in 0..item.count {
             current_global_idx += 1;
 
@@ -273,7 +281,7 @@ pub async fn run_sequence(
                 continue;
             }
 
-             if !is_running.load(Ordering::Relaxed) {
+            if !is_running.load(Ordering::Relaxed) {
                 let msg = "Sequence cancelled manually.".to_string();
                 println!("{}", msg);
                 let _ = sender.send(msg);
@@ -291,9 +299,15 @@ pub async fn run_sequence(
             // --- Meridian flip check (Light frames only) ---
             if matches!(item.item_type, SequenceType::Light) {
                 if let (Some(client), Some(fc)) = (indi_client, flip_config) {
-                    if client.needs_meridian_flip(fc.longitude_deg, fc.post_meridian_limit_h).await {
+                    if client
+                        .needs_meridian_flip(fc.longitude_deg, fc.post_meridian_limit_h)
+                        .await
+                    {
                         let pier_before = client.get_pier_side().await;
-                        let ha = client.get_hour_angle(fc.longitude_deg).await.unwrap_or(f64::NAN);
+                        let ha = client
+                            .get_hour_angle(fc.longitude_deg)
+                            .await
+                            .unwrap_or(f64::NAN);
                         let flip_msg = format!(
                             "Meridian flip triggered! Pier={}, HA={:.3}h. Flipping...",
                             pier_before, ha
@@ -301,13 +315,17 @@ pub async fn run_sequence(
                         println!("{}", flip_msg);
                         let _ = sender.send(flip_msg);
 
-                        match client.execute_meridian_flip(
-                            fc.target_ra_h,
-                            fc.target_dec_deg,
-                            Some(is_running.as_ref()),
-                        ).await {
+                        match client
+                            .execute_meridian_flip(
+                                fc.target_ra_h,
+                                fc.target_dec_deg,
+                                Some(is_running.as_ref()),
+                            )
+                            .await
+                        {
                             Ok(new_side) => {
-                                let msg = format!("Meridian flip complete. New pier side: {}", new_side);
+                                let msg =
+                                    format!("Meridian flip complete. New pier side: {}", new_side);
                                 println!("{}", msg);
                                 let _ = sender.send(msg);
 
@@ -315,7 +333,8 @@ pub async fn run_sequence(
                                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                             }
                             Err(e) => {
-                                let msg = format!("Meridian flip failed: {}. Continuing anyway.", e);
+                                let msg =
+                                    format!("Meridian flip failed: {}. Continuing anyway.", e);
                                 eprintln!("{}", msg);
                                 let _ = sender.send(msg);
                             }
@@ -323,25 +342,36 @@ pub async fn run_sequence(
 
                         // Re-check stop/pause after the flip slew
                         if !is_running.load(Ordering::Relaxed) {
-                            let _ = sender.send("Sequence cancelled during meridian flip.".to_string());
+                            let _ =
+                                sender.send("Sequence cancelled during meridian flip.".to_string());
                             return Ok(());
                         }
                     }
                 }
             }
 
-            let msg = format!("PROGRESS:{}/{}:Capturing {} frame {}/{} ({}s)...", current_global_idx, total_count, type_name, i + 1, item.count, exposure);
+            let msg = format!(
+                "PROGRESS:{}/{}:Capturing {} frame {}/{} ({}s)...",
+                current_global_idx,
+                total_count,
+                type_name,
+                i + 1,
+                item.count,
+                exposure
+            );
             println!("{}", msg);
             let _ = sender.send(msg);
-            
+
             // Note: Aperture is passed as None to keep current or can be wired up if needed
-            let path = camera.take_photo(
-                settings.iso,
-                settings.aperture,
-                exposure,
-                &current_save_dir,
-                Some(is_running),
-            ).await?;
+            let path = camera
+                .take_photo(
+                    settings.iso,
+                    settings.aperture,
+                    exposure,
+                    &current_save_dir,
+                    Some(is_running),
+                )
+                .await?;
 
             // Check if cancelled during exposure
             if !is_running.load(Ordering::Relaxed) {
@@ -373,11 +403,13 @@ pub async fn run_sequence(
                     // Rename file to include target and date
                     if let Some(ext) = path_bg.extension() {
                         let ext_str = ext.to_string_lossy();
-                        let new_filename = format!("{}_{}_{:04}.{}", target_bg, date_bg, idx, ext_str);
+                        let new_filename =
+                            format!("{}_{}_{:04}.{}", target_bg, date_bg, idx, ext_str);
                         let new_path = save_dir_bg.join(&new_filename);
                         if let Err(e) = std::fs::rename(&path_bg, &new_path) {
                             eprintln!("Failed to rename file: {}", e);
-                            let _ = sender_bg.send(format!("Warning: Failed to rename file: {}", e));
+                            let _ =
+                                sender_bg.send(format!("Warning: Failed to rename file: {}", e));
                         } else {
                             println!("Saved to {}", new_path.display());
 
@@ -388,7 +420,10 @@ pub async fn run_sequence(
                                     let _ = sender_bg.send("SEQ_IMAGE_READY".to_string());
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to convert sequence image for preview: {}", e);
+                                    eprintln!(
+                                        "Failed to convert sequence image for preview: {}",
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -410,17 +445,13 @@ pub async fn run_sequence(
         }
     }
 
-
     // Wait for the last background rename/convert task to finish before
     // announcing completion.
     if let Some(task) = prev_post_task.take() {
         let _ = task.await;
     }
 
-    let msg = format!(
-        "Sequence complete! Captured {} frames total.",
-        total_count
-    );
+    let msg = format!("Sequence complete! Captured {} frames total.", total_count);
     println!("{}", msg);
     let _ = sender.send(msg);
 

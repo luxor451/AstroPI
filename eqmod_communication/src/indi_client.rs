@@ -437,7 +437,7 @@ impl IndiClient {
         self.unpark().await?;
 
         // Give it a moment to process unpark if needed
-        sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_millis(250)).await;
 
         self.send_switch("TELESCOPE_TRACK_STATE", &[("TRACK_ON", true), ("TRACK_OFF", false)]).await?;
         self.send_switch("ON_COORD_SET", &[
