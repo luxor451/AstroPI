@@ -748,6 +748,7 @@ impl IndiClient {
     async fn monitor_slew(&self, target_ra: f64, target_dec: f64, is_running: Option<&std::sync::atomic::AtomicBool>) -> Result<()> {
         let start = Instant::now();
         let mut last_pos: (f64, f64) = (0.0, 0.0);
+        let mut seen_busy = false;
         
         println!("DEBUG: Waiting for slew start...");
         // Wait a bit to ensure the mount has time to react to the command
@@ -757,7 +758,6 @@ impl IndiClient {
             // Check atomic bool if provided
             if let Some(running) = is_running {
                 let val = running.load(std::sync::atomic::Ordering::Relaxed);
-                // println!("DEBUG: monitor_slew check is_running: {}", val);
                 if !val {
                     println!("DEBUG: monitor_slew aborted by is_running flag.");
                     if let Some(sender) = &self.sender {
@@ -771,8 +771,6 @@ impl IndiClient {
             {
                 let mut msg_lock = self.latest_message.lock().await;
                 let msg = msg_lock.clone();
-                // "slewing to" and "outside limits" is a common error message format
-                // but checking generic "horizon" or "limit" keywords is safer
                 if msg.to_lowercase().contains("horizon") || msg.to_lowercase().contains("limit") {
                      let err_msg = format!("Error: {}", msg);
                      println!("{}", err_msg);
@@ -786,12 +784,13 @@ impl IndiClient {
 
             sleep(Duration::from_millis(1000)).await;
             
-            let (ra, dec, state_str) = {
+            let (ra, dec, state_str, is_busy) = {
                 let state_lock = self.state.read().await;
                 if let Some(props) = state_lock.devices.get(&self.device_name) {
                     let mut r = last_pos.0;
                     let mut d = last_pos.1;
                     let mut s = "UNKNOWN".to_string();
+                    let mut busy = false;
 
                     if let Some(coord) = props.get("EQUATORIAL_EOD_COORD") {
                          r = coord.elements.get("RA").and_then(|v| v.parse().ok()).unwrap_or(last_pos.0);
@@ -799,16 +798,21 @@ impl IndiClient {
                          
                          if coord.state == "Busy" {
                              s = " SLEWING".to_string();
+                             busy = true;
                          } else if coord.state == "Ok" {
                              s = " TRACKING".to_string();
                          }
                     }
-                    (r, d, s)
+                    (r, d, s, busy)
                 } else {
-                    (last_pos.0, last_pos.1, "UNKNOWN".to_string())
+                    (last_pos.0, last_pos.1, "UNKNOWN".to_string(), false)
                 }
             };
             
+            if is_busy {
+                seen_busy = true;
+            }
+
             let elapsed = start.elapsed().as_secs();
             let delta_ra = (ra - last_pos.0).abs();
             let delta_dec = (dec - last_pos.1).abs();
@@ -823,18 +827,19 @@ impl IndiClient {
 
             last_pos = (ra, dec);
 
-            // Check if near target
-            if (ra - target_ra).abs() < 0.01 && (dec - target_dec).abs() < 0.1 {
-                // Also check if state is no longer Busy
-                let is_busy = {
-                    let state_lock = self.state.read().await;
-                    if let Some(props) = state_lock.devices.get(&self.device_name) {
-                        props.get("EQUATORIAL_EOD_COORD").map(|p| p.state == "Busy").unwrap_or(false)
-                    } else { false }
-                };
-                
-                if !is_busy {
-                    println!("\n Mount reached target position!");
+            // Slew is complete when the INDI state transitions from Busy → Ok.
+            // Trust the driver's state over position comparison, which can fail
+            // due to mount modeling, alignment offsets, or epoch differences.
+            if seen_busy && !is_busy {
+                println!("\n Mount reached target position! (Busy -> Ok transition)");
+                break;
+            }
+
+            // Fallback: if the mount was already near the target (never went Busy)
+            // and enough time has passed for the command to take effect, accept it.
+            if !seen_busy && !is_busy && elapsed > 3 {
+                if (ra - target_ra).abs() < 0.01 && (dec - target_dec).abs() < 0.1 {
+                    println!("\n Mount already at target position!");
                     break;
                 }
             }
