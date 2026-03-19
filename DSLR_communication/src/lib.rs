@@ -37,7 +37,11 @@ impl CameraController {
         self.camera.abilities().model().to_string()
     }
 
-    /// Take a long exposure photo (bulb mode)
+    /// Take a long exposure photo
+    ///
+    /// For exposures ≤30s, uses the camera's built-in shutter speed timer
+    /// (hardware-precise). For longer exposures, falls back to software-timed
+    /// bulb mode.
     ///
     /// # Arguments
     /// * `iso` - ISO value (e.g., 100, 400, 800, 1600, 3200)
@@ -64,8 +68,19 @@ impl CameraController {
             self.set_aperture(ap).await?;
         }
 
-        // Take the bulb exposure
-        let filename = self.bulb_capture(Duration::from_secs(exposure_seconds), save_path, cancel_flag).await?;
+        // For exposures ≤30s, try camera-timed capture (hardware precision).
+        // Fall back to software-timed bulb for longer or if shutterspeed setting fails.
+        let filename = if exposure_seconds <= 30 {
+            match self.camera_timed_capture(exposure_seconds, save_path, cancel_flag).await {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Camera-timed capture failed ({}), falling back to bulb", e);
+                    self.bulb_capture(Duration::from_secs(exposure_seconds), save_path, cancel_flag).await?
+                }
+            }
+        } else {
+            self.bulb_capture(Duration::from_secs(exposure_seconds), save_path, cancel_flag).await?
+        };
 
         Ok(save_path.join(filename))
     }
@@ -139,6 +154,72 @@ impl CameraController {
         }
     }
 
+    /// Capture using the camera's built-in shutter speed timer (hardware-precise).
+    /// Sets shutterspeed to the requested value, triggers a normal capture, then
+    /// restores the previous shutterspeed setting.
+    async fn camera_timed_capture(
+        &self,
+        exposure_seconds: u64,
+        save_path: &Path,
+        _cancel_flag: Option<&AtomicBool>,
+    ) -> Result<String> {
+        let widget: RadioWidget = self.camera.config_key("shutterspeed").await?;
+        let prev_choice = widget.choice();
+
+        // Find the closest matching shutter speed from available choices.
+        // Camera choices are strings like "1", "2", "5", "10", "15", "20", "30", "bulb", etc.
+        let target = exposure_seconds.to_string();
+        let choices: Vec<String> = widget.choices_iter().collect();
+        let matched = choices.iter().find(|c| *c == &target);
+
+        let choice = match matched {
+            Some(c) => c.clone(),
+            None => {
+                return Err(Error::from(format!(
+                    "Shutter speed {}s not available on camera. Options: {:?}",
+                    exposure_seconds, choices
+                )));
+            }
+        };
+
+        widget.set_choice(&choice)?;
+        self.camera.set_config(&widget).await?;
+
+        // Trigger capture — the camera handles its own hardware timer.
+        // capture_image() blocks until the camera finishes the exposure and
+        // writes the file, so no software timing loop is needed.
+        let result = self.camera.capture_image().await;
+
+        // Restore previous shutter speed
+        let widget: RadioWidget = self.camera.config_key("shutterspeed").await?;
+        widget.set_choice(&prev_choice)?;
+        self.camera.set_config(&widget).await?;
+
+        let file = result?;
+        let filename = file.name().to_string();
+        let dest = save_path.join(&filename);
+
+        let final_dest = if dest.exists() {
+            let stem = dest.file_stem().unwrap_or_default().to_string_lossy();
+            let ext = dest.extension().unwrap_or_default().to_string_lossy();
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let new_name = format!("{}_{}.{}", stem, ts, ext);
+            save_path.join(&new_name)
+        } else {
+            dest
+        };
+
+        self.camera
+            .fs()
+            .download_to(&file.folder(), &file.name(), &final_dest)
+            .await?;
+
+        Ok(final_dest.file_name().unwrap().to_string_lossy().to_string())
+    }
+
     async fn bulb_capture(&self, duration: Duration, save_path: &Path, cancel_flag: Option<&AtomicBool>) -> Result<String> {
         // Try the bulb toggle method first (works on Nikon and some Canon)
         if let Ok(()) = self.bulb_with_toggle(duration, cancel_flag).await {
@@ -156,17 +237,18 @@ impl CameraController {
     }
 
     async fn wait_for_duration(&self, duration: Duration, cancel_flag: Option<&AtomicBool>) -> bool {
+        let start = std::time::Instant::now();
         let step = Duration::from_millis(100);
-        let mut elapsed = Duration::from_secs(0);
 
-        while elapsed < duration {
+        while start.elapsed() < duration {
             if let Some(flag) = cancel_flag {
                 if !flag.load(Ordering::Relaxed) {
                     return true; // Cancelled
                 }
             }
-            sleep(step).await;
-            elapsed += step;
+            // Sleep for the lesser of one step or the remaining time
+            let remaining = duration.saturating_sub(start.elapsed());
+            sleep(remaining.min(step)).await;
         }
         false // Not cancelled
     }
