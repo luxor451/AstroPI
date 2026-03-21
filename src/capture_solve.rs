@@ -53,8 +53,8 @@ pub struct CaptureSettings {
     pub iso: u64,
     /// Aperture f-stop (None = use current setting)
     pub aperture: Option<f64>,
-    /// Exposure time in seconds (default: 5)
-    pub exposure_seconds: u64,
+    /// Exposure time in seconds (fractional values supported)
+    pub exposure_seconds: f64,
     /// Directory to save captured images
     pub save_directory: PathBuf,
 }
@@ -64,7 +64,7 @@ impl Default for CaptureSettings {
         Self {
             iso: 6400,
             aperture: None,
-            exposure_seconds: 5,
+            exposure_seconds: 5.0,
             save_directory: PathBuf::from("tmp/astro_captures"),
         }
     }
@@ -268,10 +268,10 @@ pub async fn run_sequence(
 
         std::fs::create_dir_all(&current_save_dir)?;
 
-        let exposure = if matches!(item.item_type, SequenceType::Bias) {
-            0 // minimal exposure supported by camera lib for bias
+        let exposure: f64 = if matches!(item.item_type, SequenceType::Bias) {
+            0.0 // minimal exposure supported by camera lib for bias
         } else {
-            item.exposure as u64
+            item.exposure
         };
 
         for i in 0..item.count {

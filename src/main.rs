@@ -315,7 +315,7 @@ async fn take_preview(
         None => return HttpResponse::InternalServerError().body("Camera not connected"),
     };
 
-    let exposure_seconds = payload.exposure.parse::<u64>().unwrap_or(5);
+    let exposure_seconds = payload.exposure.parse::<f64>().unwrap_or(5.0);
     let aperture_str = payload.aperture.trim().replace("f/", "");
     let aperture = if aperture_str.is_empty() {
         None
@@ -575,7 +575,7 @@ async fn handle_goto(payload: web::Json<GoToPayload>, data: web::Data<AppState>)
     let platesolve_settings = CaptureSettings {
         iso: settings.iso,
         aperture: None,
-        exposure_seconds: settings.platesolving_exposure as u64,
+        exposure_seconds: settings.platesolving_exposure,
         save_directory: PathBuf::from("imgs/goto/captures"),
     };
 
@@ -670,7 +670,7 @@ async fn handle_start_sequence(
     let capture_settings = CaptureSettings {
         iso,
         aperture: None,
-        exposure_seconds: 0,
+        exposure_seconds: 0.0,
         save_directory: PathBuf::from("imgs/astro_captures"),
     };
 
@@ -850,7 +850,7 @@ async fn handle_start_sequence(
                             let platesolve_settings = CaptureSettings {
                                 iso,
                                 aperture: None,
-                                exposure_seconds: platesolving_exposure as u64,
+                                exposure_seconds: platesolving_exposure,
                                 save_directory: PathBuf::from("imgs/goto/captures"),
                             };
                             if let Some(indi) = indi_ref {
