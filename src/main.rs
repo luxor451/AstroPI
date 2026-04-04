@@ -23,6 +23,10 @@ use routes::mount::{
 };
 use routes::sequence::{handle_pause, handle_start_sequence, handle_stop};
 use routes::settings::{get_location, get_settings, update_location, update_settings};
+use routes::gallery::{
+    gallery_convert_fits, gallery_download, gallery_files, gallery_fits_header,
+    gallery_preview, gallery_thumbnail,
+};
 use routes::status::{handle_status, ping, receive_command, sse_events};
 use routes::system::{handle_reboot, handle_shutdown, update_time};
 
@@ -125,6 +129,13 @@ async fn main() -> std::io::Result<()> {
             .service(update_time)
             .service(handle_shutdown)
             .service(handle_reboot)
+            // Gallery
+            .service(gallery_files)
+            .service(gallery_thumbnail)
+            .service(gallery_preview)
+            .service(gallery_convert_fits)
+            .service(gallery_fits_header)
+            .service(gallery_download)
             // Status & events
             .service(handle_status)
             .service(sse_events)

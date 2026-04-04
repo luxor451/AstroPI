@@ -398,6 +398,9 @@ pub async fn run_sequence(
                 let date_bg = date_str.to_string();
                 let idx = current_global_idx;
                 let total = total_count;
+                // Capture mount position for FITS header (from flip config if available)
+                let ra_h_bg   = flip_config.map(|c| c.target_ra_h);
+                let dec_deg_bg = flip_config.map(|c| c.target_dec_deg);
 
                 prev_post_task = Some(tokio::task::spawn_blocking(move || {
                     // Rename file to include target and date
@@ -424,6 +427,51 @@ pub async fn run_sequence(
                                         "Failed to convert sequence image for preview: {}",
                                         e
                                     );
+                                }
+                            }
+
+                            // Auto-convert RAW to FITS with mount position in header
+                            let fits_dir = PathBuf::from("imgs/fits");
+                            if std::fs::create_dir_all(&fits_dir).is_ok() {
+                                let stem = new_path
+                                    .file_stem()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .into_owned();
+                                let fits_path = fits_dir.join(format!("{stem}.fits"));
+                                if !fits_path.exists() {
+                                    let ra_str = ra_h_bg
+                                        .map(|h| format!("{:.6}", h * 15.0)) // hours → degrees
+                                        .unwrap_or_default();
+                                    let dec_str = dec_deg_bg
+                                        .map(|d| format!("{:.6}", d))
+                                        .unwrap_or_default();
+                                    let mut args: Vec<&str> = vec![
+                                        "fits",
+                                        new_path.to_str().unwrap_or(""),
+                                        fits_path.to_str().unwrap_or(""),
+                                        &target_bg,
+                                    ];
+                                    if !ra_str.is_empty() {
+                                        args.push(&ra_str);
+                                        args.push(&dec_str);
+                                    }
+                                    let out = std::process::Command::new("python3")
+                                        .arg("scripts/raw_tools.py")
+                                        .args(&args)
+                                        .output();
+                                    match out {
+                                        Ok(o) if o.status.success() => {
+                                            let _ = sender_bg.send(
+                                                format!("FITS saved: {stem}.fits"),
+                                            );
+                                        }
+                                        Ok(o) => eprintln!(
+                                            "FITS conversion failed: {}",
+                                            String::from_utf8_lossy(&o.stderr)
+                                        ),
+                                        Err(e) => eprintln!("raw_tools.py spawn error: {e}"),
+                                    }
                                 }
                             }
                         }
