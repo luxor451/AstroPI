@@ -139,6 +139,144 @@ def cmd_fitshdr(input_path: str):
     print(json.dumps(result))
 
 
+def _extract_stars_from_raw(image_path: str, max_stars: int = 200):
+    """Extract star pixel positions from a RAW (or FITS) image.
+
+    Uses the same threshold logic as the Rust plate solver:
+      threshold = 15% of white_level (the raw integer value, no BL subtraction).
+
+    Returns a list of (x, y) tuples in pixel coordinates, brightest first.
+    """
+    import rawpy
+    from scipy import ndimage
+
+    ext = Path(image_path).suffix.lower()
+
+    if ext in ('.fits', '.fit'):
+        from astropy.io import fits as astrofits
+        with astrofits.open(image_path) as hdul:
+            data = hdul[0].data.astype(np.float32)
+        if data.ndim == 3:
+            data = data[0]
+        gray = data
+        # For FITS, use percentile-based threshold (no concept of white_level)
+        threshold_value = float(np.percentile(gray, 99.5))
+    else:
+        with rawpy.imread(image_path) as raw:
+            # Use the full Bayer image (all channels) — matches Rust get_pixel_matrix_from_dng
+            gray = raw.raw_image_visible.astype(np.float32)
+            # Match Rust: threshold at 15% of white_level (no black-level subtraction)
+            white_level = float(raw.white_level)
+        threshold_value = 0.15 * white_level
+
+    binary = gray > threshold_value
+
+    labeled, num_features = ndimage.label(binary)
+    if num_features == 0:
+        return []
+
+    # Compute centroid and peak brightness for each blob
+    centroids = ndimage.center_of_mass(gray, labeled, range(1, num_features + 1))
+    peaks = ndimage.maximum(gray, labeled, range(1, num_features + 1))
+
+    # Filter: blobs must have >= 5 pixels (same as Rust MIN_STAR_PIXELS)
+    binary_int = binary.astype(np.uint8)
+    sizes = ndimage.sum(binary_int, labeled, range(1, num_features + 1))
+
+    stars = []
+    for i, (cy, cx) in enumerate(centroids):
+        if sizes[i] >= 5:
+            stars.append((float(cx), float(cy), float(peaks[i])))
+
+    # Sort by brightness descending, return top max_stars
+    stars.sort(key=lambda s: s[2], reverse=True)
+    return [(s[0], s[1]) for s in stars[:max_stars]]
+
+
+def cmd_solve(image_path: str, ra_hint_deg: float, dec_hint_deg: float,
+              pixel_scale_low: float, pixel_scale_high: float,
+              search_radius_deg: float = 10.0,
+              index_cache_dir: str = None):
+    """Plate-solve an image using astrometry.net (Python package).
+
+    Outputs a JSON object on stdout:
+      {"success": true, "ra_deg": ..., "dec_deg": ...,
+       "scale_arcsec_per_pixel": ..., "logodds": ...}
+    or
+      {"success": false, "error": "..."}
+    """
+    import astrometry
+
+    if index_cache_dir is None:
+        index_cache_dir = Path.home() / '.cache' / 'astrometry'
+
+    # Select scales that overlap with the provided pixel-scale range.
+    # series_4200 scale k roughly covers 2^(k/2)..2^((k+2)/2) arcsec/pix.
+    # We use scales 5-7 which cover ~1.7-7 arcsec/pix – broad enough for
+    # typical DSLR setups.
+    scales = {5, 6, 7}
+
+    try:
+        index_files = astrometry.series_4200.index_files(
+            cache_directory=index_cache_dir,
+            scales=scales,
+        )
+    except Exception as e:
+        print(json.dumps({"success": False, "error": f"Failed to load index files: {e}"}))
+        sys.exit(0)
+
+    if not index_files:
+        print(json.dumps({"success": False, "error": "No index files available"}))
+        sys.exit(0)
+
+    # Extract stars from the image
+    try:
+        stars = _extract_stars_from_raw(image_path)
+    except Exception as e:
+        print(json.dumps({"success": False, "error": f"Star extraction failed: {e}"}))
+        sys.exit(0)
+
+    if len(stars) < 5:
+        print(json.dumps({"success": False,
+                          "error": f"Too few stars detected ({len(stars)}), need at least 5"}))
+        sys.exit(0)
+
+    try:
+        with astrometry.Solver(index_files) as solver:
+            solution = solver.solve(
+                stars=stars,
+                size_hint=astrometry.SizeHint(
+                    lower_arcsec_per_pixel=pixel_scale_low,
+                    upper_arcsec_per_pixel=pixel_scale_high,
+                ),
+                position_hint=astrometry.PositionHint(
+                    ra_deg=ra_hint_deg,
+                    dec_deg=dec_hint_deg,
+                    radius_deg=search_radius_deg,
+                ),
+                solution_parameters=astrometry.SolutionParameters(
+                    logodds_callback=lambda logodds: (
+                        astrometry.Action.STOP if logodds > 40 else astrometry.Action.CONTINUE
+                    ),
+                ),
+            )
+    except Exception as e:
+        print(json.dumps({"success": False, "error": f"Solver error: {e}"}))
+        sys.exit(0)
+
+    if solution.has_match():
+        m = solution.best_match()
+        print(json.dumps({
+            "success": True,
+            "ra_deg": m.center_ra_deg,
+            "dec_deg": m.center_dec_deg,
+            "scale_arcsec_per_pixel": m.scale_arcsec_per_pixel,
+            "logodds": m.logodds,
+        }))
+    else:
+        print(json.dumps({"success": False, "error": "No solution found"}))
+
+
 if __name__ == '__main__':
     if len(sys.argv) < 2:
         print(__doc__)
@@ -159,6 +297,23 @@ if __name__ == '__main__':
         cmd_fits(sys.argv[2], sys.argv[3], obj, ra, dec)
     elif cmd == 'fitshdr':
         cmd_fitshdr(sys.argv[2])
+    elif cmd == 'solve':
+        # solve <image> <ra_deg> <dec_deg> <scale_low> <scale_high> [radius_deg] [cache_dir]
+        if len(sys.argv) < 7:
+            print('Usage: raw_tools.py solve <image> <ra_deg> <dec_deg> <scale_low_arcsec_per_pix> <scale_high_arcsec_per_pix> [radius_deg] [cache_dir]',
+                  file=sys.stderr)
+            sys.exit(1)
+        radius = float(sys.argv[7]) if len(sys.argv) > 7 else 10.0
+        cache  = sys.argv[8]        if len(sys.argv) > 8 else None
+        cmd_solve(
+            image_path=sys.argv[2],
+            ra_hint_deg=float(sys.argv[3]),
+            dec_hint_deg=float(sys.argv[4]),
+            pixel_scale_low=float(sys.argv[5]),
+            pixel_scale_high=float(sys.argv[6]),
+            search_radius_deg=radius,
+            index_cache_dir=cache,
+        )
     else:
         print(f'Unknown command: {cmd}', file=sys.stderr)
         sys.exit(1)

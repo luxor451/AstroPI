@@ -1,3 +1,4 @@
+mod astrometry_solver;
 mod capture_solve;
 mod goto_closed_loop;
 mod routes;

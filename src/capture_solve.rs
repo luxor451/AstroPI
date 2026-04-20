@@ -11,9 +11,11 @@ use tokio::sync::broadcast::Sender;
 // Removed chrono import plan as discussed, using string injection from payload
 
 use astro_pi_plate_solving::{
-    cr3_to_png, solve_plate_with_options, Arcdegrees, CameraConfig, CoordinateEquatorial,
+    cr3_to_png, Arcdegrees, CameraConfig, CoordinateEquatorial,
     PlateSolvingResult, RaHoursMinutesSeconds,
 };
+
+use crate::astrometry_solver::solve_with_astrometry;
 use camera_control::CameraController;
 use eqmod_communication::IndiClient;
 use serde::Deserialize;
@@ -134,7 +136,7 @@ pub async fn capture_and_solve(
     );
 
     let solve_start = Instant::now();
-    let solution = solve_plate_with_options(&image_path, initial_guess, 20000, cam_config)?;
+    let solution = solve_with_astrometry(&image_path, initial_guess, cam_config)?;
     let solve_time = solve_start.elapsed();
 
     if solution.coeffs_x.is_some() {
