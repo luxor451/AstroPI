@@ -255,8 +255,10 @@ def cmd_solve(image_path: str, ra_hint_deg: float, dec_hint_deg: float,
                     radius_deg=search_radius_deg,
                 ),
                 solution_parameters=astrometry.SolutionParameters(
-                    logodds_callback=lambda logodds: (
-                        astrometry.Action.STOP if logodds > 40 else astrometry.Action.CONTINUE
+                    logodds_callback=lambda logodds_list: (
+                        astrometry.Action.STOP
+                        if max(logodds_list) > 40
+                        else astrometry.Action.CONTINUE
                     ),
                 ),
             )
