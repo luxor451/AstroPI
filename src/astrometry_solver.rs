@@ -5,10 +5,41 @@
 //! the full astrometry.net C code in Rust and lets us reuse the existing
 //! Python/rawpy star-extraction pipeline.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use astro_pi_plate_solving::{CameraConfig, CoordinateEquatorial, PlateSolvingResult};
+
+/// Locate `scripts/raw_tools.py` robustly.
+///
+/// Checks (in order):
+///  1. `$ASTROPI_SCRIPTS/raw_tools.py`  — explicit env-var override
+///  2. `<binary_dir>/scripts/raw_tools.py` — production: binary next to scripts/
+///  3. `<binary_dir>/../scripts/raw_tools.py` — dev: binary inside target/…/
+///  4. `scripts/raw_tools.py` relative to CWD — fallback (matches the rest of
+///     the codebase which also uses CWD-relative paths for imgs/, fits/, etc.)
+fn find_raw_tools() -> PathBuf {
+    // 1. Explicit override via environment variable
+    if let Ok(dir) = std::env::var("ASTROPI_SCRIPTS") {
+        let p = PathBuf::from(dir).join("raw_tools.py");
+        if p.exists() {
+            return p;
+        }
+    }
+
+    // 2 & 3. Search relative to the running binary
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors().skip(1).take(3) {
+            let p = ancestor.join("scripts").join("raw_tools.py");
+            if p.exists() {
+                return p;
+            }
+        }
+    }
+
+    // 4. CWD fallback
+    PathBuf::from("scripts").join("raw_tools.py")
+}
 
 /// Solve a RAW image using the astrometry.net Python package.
 ///
@@ -49,9 +80,13 @@ pub fn solve_with_astrometry(
          scale={scale_low:.2}–{scale_high:.2} arcsec/pix  radius={radius_deg}°"
     );
 
+    let script = find_raw_tools();
+    let script_str = script.to_str().unwrap_or("scripts/raw_tools.py");
+    println!("[astrometry] using script: {script_str}");
+
     let output = std::process::Command::new("python3")
         .args([
-            "scripts/raw_tools.py",
+            script_str,
             "solve",
             image_str,
             &format!("{ra_deg:.6}"),

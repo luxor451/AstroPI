@@ -746,44 +746,48 @@ impl IndiClient {
 
     /// Monitor the slew progress
     async fn monitor_slew(&self, target_ra: f64, target_dec: f64, is_running: Option<&std::sync::atomic::AtomicBool>) -> Result<()> {
+        let _ = (target_ra, target_dec); // kept for signature compatibility; not used for comparison
         let start = Instant::now();
         let mut last_pos: (f64, f64) = (0.0, 0.0);
         let mut seen_busy = false;
-        
-        println!("DEBUG: Waiting for slew start...");
-        // Wait a bit to ensure the mount has time to react to the command
-        sleep(Duration::from_millis(500)).await;
+        // Tracks consecutive seconds the mount has been in non-Busy state.
+        // Used to detect fast correction slews that complete before polling starts.
+        let mut stable_ok_secs: u64 = 0;
+        let mut first_poll = true;
 
         loop {
-            // Check atomic bool if provided
             if let Some(running) = is_running {
-                let val = running.load(std::sync::atomic::Ordering::Relaxed);
-                if !val {
-                    println!("DEBUG: monitor_slew aborted by is_running flag.");
+                if !running.load(std::sync::atomic::Ordering::Relaxed) {
                     if let Some(sender) = &self.sender {
-                         let _ = sender.send("Slew aborted by user.".to_string());
+                        let _ = sender.send("Slew aborted by user.".to_string());
                     }
                     return Ok(());
                 }
             }
 
-            // Check for error messages first
+            // Check for horizon / limit error messages from the driver
             {
                 let mut msg_lock = self.latest_message.lock().await;
                 let msg = msg_lock.clone();
                 if msg.to_lowercase().contains("horizon") || msg.to_lowercase().contains("limit") {
-                     let err_msg = format!("Error: {}", msg);
-                     println!("{}", err_msg);
-                     if let Some(sender) = &self.sender {
-                         let _ = sender.send(err_msg.clone());
+                    let err_msg = format!("Error: {}", msg);
+                    println!("{}", err_msg);
+                    if let Some(sender) = &self.sender {
+                        let _ = sender.send(err_msg.clone());
                     }
-                    *msg_lock = String::new(); // Clear message
+                    *msg_lock = String::new();
                     return Err(IndiError::Command(msg));
                 }
             }
 
-            sleep(Duration::from_millis(1000)).await;
-            
+            // First poll is immediate so we catch fast correction slews that
+            // complete in < 1 second.  All subsequent polls are 1-second apart.
+            if first_poll {
+                first_poll = false;
+            } else {
+                sleep(Duration::from_millis(1000)).await;
+            }
+
             let (ra, dec, state_str, is_busy) = {
                 let state_lock = self.state.read().await;
                 if let Some(props) = state_lock.devices.get(&self.device_name) {
@@ -793,33 +797,37 @@ impl IndiClient {
                     let mut busy = false;
 
                     if let Some(coord) = props.get("EQUATORIAL_EOD_COORD") {
-                         r = coord.elements.get("RA").and_then(|v| v.parse().ok()).unwrap_or(last_pos.0);
-                         d = coord.elements.get("DEC").and_then(|v| v.parse().ok()).unwrap_or(last_pos.1);
-                         
-                         if coord.state == "Busy" {
-                             s = " SLEWING".to_string();
-                             busy = true;
-                         } else if coord.state == "Ok" {
-                             s = " TRACKING".to_string();
-                         }
+                        r = coord.elements.get("RA").and_then(|v| v.parse().ok()).unwrap_or(last_pos.0);
+                        d = coord.elements.get("DEC").and_then(|v| v.parse().ok()).unwrap_or(last_pos.1);
+
+                        if coord.state == "Busy" {
+                            s = " SLEWING".to_string();
+                            busy = true;
+                        } else if coord.state == "Ok" {
+                            s = " TRACKING".to_string();
+                        }
                     }
                     (r, d, s, busy)
                 } else {
                     (last_pos.0, last_pos.1, "UNKNOWN".to_string(), false)
                 }
             };
-            
+
             if is_busy {
                 seen_busy = true;
+                stable_ok_secs = 0;
+            } else {
+                stable_ok_secs += 1;
             }
 
             let elapsed = start.elapsed().as_secs();
             let delta_ra = (ra - last_pos.0).abs();
             let delta_dec = (dec - last_pos.1).abs();
 
-            let msg = format!("[{:2}s] {} Pointing to : - RA: {:.6}h, DEC: {:.6}° (ΔRA:{:.4}h, ΔDEC:{:.4}°)",
-                elapsed, state_str, ra, dec, delta_ra, delta_dec);
-            
+            let msg = format!(
+                "[{:2}s] {} Pointing to : - RA: {:.6}h, DEC: {:.6}° (ΔRA:{:.4}h, ΔDEC:{:.4}°)",
+                elapsed, state_str, ra, dec, delta_ra, delta_dec
+            );
             println!("{}", msg);
             if let Some(sender) = &self.sender {
                 let _ = sender.send(msg);
@@ -827,26 +835,26 @@ impl IndiClient {
 
             last_pos = (ra, dec);
 
-            // Slew is complete when the INDI state transitions from Busy → Ok.
-            // Trust the driver's state over position comparison, which can fail
-            // due to mount modeling, alignment offsets, or epoch differences.
+            // Primary: Busy → Ok transition means slew completed normally.
             if seen_busy && !is_busy {
-                println!("\n Mount reached target position! (Busy -> Ok transition)");
+                println!("Mount reached target position (Busy -> Ok transition).");
                 break;
             }
 
-            // Fallback: if the mount was already near the target (never went Busy)
-            // and enough time has passed for the command to take effect, accept it.
-            if !seen_busy && !is_busy && elapsed > 3 {
-                if (ra - target_ra).abs() < 0.01 && (dec - target_dec).abs() < 0.1 {
-                    println!("\n Mount already at target position!");
-                    break;
-                }
+            // Fallback: mount was never seen as Busy and has been in Ok/Tracking
+            // state for ≥ 5 consecutive seconds.  This handles fast correction
+            // slews (< 1 s) that complete before the first poll, and also the
+            // case where the mount is already close enough that EQMod skips the
+            // Busy state entirely.  We do NOT compare coordinates here because
+            // target_ra/dec may be J2000 while EQUATORIAL_EOD_COORD is EOD —
+            // the epoch offset (~arcminutes) would cause spurious mismatches.
+            if !seen_busy && stable_ok_secs >= 5 {
+                println!("Mount already at target position (stable Tracking, no slew detected).");
+                break;
             }
-            
-            // Timeout safety
-            if elapsed > 120 { 
-                return Err(IndiError::Command("Slew timed out".to_string()));
+
+            if elapsed > 120 {
+                return Err(IndiError::Command("Slew timed out after 120 s".to_string()));
             }
         }
 

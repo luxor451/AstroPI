@@ -139,18 +139,37 @@ def cmd_fitshdr(input_path: str):
     print(json.dumps(result))
 
 
-def _extract_stars_from_raw(image_path: str, max_stars: int = 200):
+def _extract_stars_from_raw(image_path: str, max_stars: int = 300,
+                            threshold_percentile: float = 99.5):
     """Extract star pixel positions from a RAW (or FITS) image.
 
-    Uses the same threshold logic as the Rust plate solver:
-      threshold = 15% of white_level (the raw integer value, no BL subtraction).
+    Pipeline:
+      1. Extract embedded JPEG thumbnail from RAW (fast path, ~10 ms).
+      2. Downsample 4× — 16× fewer pixels, scipy ops are fast.
+      3. Subtract local background so vignetting / light-pollution gradients
+         don't bias the threshold toward the bright centre.
+      4. Label connected components; compute per-blob stats with np.bincount
+         (vectorised — no Python loop over individual features).
+      5. Filter: discard blobs that are too small (noise/hot-pixels) or too
+         large (galaxies, nebulae, satellite trails).
+      6. Scale centroids back to full-resolution coordinates.
 
-    Returns a list of (x, y) tuples in pixel coordinates, brightest first.
+    Returns a list of (x, y) tuples in full-res pixel coordinates, brightest first.
     """
     import rawpy
-    from scipy import ndimage
+    import io
+    from PIL import Image
+    from scipy.ndimage import label as sc_label, uniform_filter
+
+    DOWNSAMPLE = 4   # spatial factor before blob detection
+    # Stars in the downsampled image are 1-4 px across.
+    # Extended objects (galaxies/nebulae) are much larger — reject them.
+    MIN_BLOB_PX = 2
+    MAX_BLOB_PX = 40   # in downsampled pixels (~160 full-res px across)
 
     ext = Path(image_path).suffix.lower()
+    scale_x = float(DOWNSAMPLE)
+    scale_y = float(DOWNSAMPLE)
 
     if ext in ('.fits', '.fit'):
         from astropy.io import fits as astrofits
@@ -158,39 +177,110 @@ def _extract_stars_from_raw(image_path: str, max_stars: int = 200):
             data = hdul[0].data.astype(np.float32)
         if data.ndim == 3:
             data = data[0]
-        gray = data
-        # For FITS, use percentile-based threshold (no concept of white_level)
-        threshold_value = float(np.percentile(gray, 99.5))
+        h, w = data.shape
+        h2, w2 = h // DOWNSAMPLE, w // DOWNSAMPLE
+        gray = data[:h2*DOWNSAMPLE, :w2*DOWNSAMPLE] \
+                   .reshape(h2, DOWNSAMPLE, w2, DOWNSAMPLE).mean(axis=(1, 3))
+        scale_x = scale_y = float(DOWNSAMPLE)
     else:
         with rawpy.imread(image_path) as raw:
-            # Use the full Bayer image (all channels) — matches Rust get_pixel_matrix_from_dng
-            gray = raw.raw_image_visible.astype(np.float32)
-            # Match Rust: threshold at 15% of white_level (no black-level subtraction)
-            white_level = float(raw.white_level)
-        threshold_value = 0.15 * white_level
+            full_h, full_w = raw.raw_image_visible.shape
+            try:
+                thumb = raw.extract_thumb()
+                if thumb.format == rawpy.ThumbFormat.JPEG:
+                    img = Image.open(io.BytesIO(thumb.data)).convert('L')
+                else:
+                    img = Image.fromarray(thumb.data).convert('L')
+            except Exception:
+                # Slow fallback: decode full Bayer plane
+                raw_arr = raw.raw_image_visible.astype(np.uint8)
+                img = Image.fromarray(raw_arr).convert('L')
 
-    binary = gray > threshold_value
+        thumb_w, thumb_h = img.size
+        scale_x = full_w / (thumb_w / DOWNSAMPLE)
+        scale_y = full_h / (thumb_h / DOWNSAMPLE)
+        small = img.resize((thumb_w // DOWNSAMPLE, thumb_h // DOWNSAMPLE),
+                           Image.BOX)
+        gray = np.array(small, dtype=np.float32)
 
-    labeled, num_features = ndimage.label(binary)
+    # ── Local background subtraction ─────────────────────────────────────────
+    # uniform_filter with a kernel ~1/8 the image height removes large-scale
+    # gradients (vignetting, light pollution, sky glow) while leaving stars
+    # (point sources) unaffected.  O(n) — fast regardless of kernel size.
+    bg_kernel = max(5, min(gray.shape) // 8)
+    background = uniform_filter(gray, size=bg_kernel)
+    gray_sub = np.clip(gray.astype(np.float32) - background, 0.0, None)
+
+    # Threshold on the background-subtracted image so the percentile reflects
+    # actual source brightness, not the varying sky pedestal.
+    positives = gray_sub[gray_sub > 0]
+    if len(positives) == 0:
+        return []
+    threshold_value = float(np.percentile(positives, threshold_percentile))
+    binary = gray_sub > threshold_value
+
+    labeled, num_features = sc_label(binary)
     if num_features == 0:
         return []
 
-    # Compute centroid and peak brightness for each blob
-    centroids = ndimage.center_of_mass(gray, labeled, range(1, num_features + 1))
-    peaks = ndimage.maximum(gray, labeled, range(1, num_features + 1))
+    labels_flat = labeled.ravel()
+    gray_flat   = gray_sub.ravel()   # use bg-subtracted for brightness ranking
 
-    # Filter: blobs must have >= 5 pixels (same as Rust MIN_STAR_PIXELS)
-    binary_int = binary.astype(np.uint8)
-    sizes = ndimage.sum(binary_int, labeled, range(1, num_features + 1))
+    # ── Vectorised per-label stats (no Python loop) ───────────────────────────
+    counts  = np.bincount(labels_flat, minlength=num_features + 1)
+    sum_x   = np.bincount(labels_flat,
+                          weights=np.tile(np.arange(gray.shape[1]), gray.shape[0]),
+                          minlength=num_features + 1)
+    sum_y   = np.bincount(labels_flat,
+                          weights=np.repeat(np.arange(gray.shape[0]), gray.shape[1]),
+                          minlength=num_features + 1)
 
-    stars = []
-    for i, (cy, cx) in enumerate(centroids):
-        if sizes[i] >= 5:
-            stars.append((float(cx), float(cy), float(peaks[i])))
+    order     = np.argsort(gray_flat)
+    peak_vals = np.zeros(num_features + 1, dtype=np.float32)
+    peak_vals[labels_flat[order]] = gray_flat[order]   # last write wins → max
 
-    # Sort by brightness descending, return top max_stars
-    stars.sort(key=lambda s: s[2], reverse=True)
-    return [(s[0], s[1]) for s in stars[:max_stars]]
+    counts   = counts[1:]
+    cx_arr   = sum_x[1:] / np.maximum(counts, 1)
+    cy_arr   = sum_y[1:] / np.maximum(counts, 1)
+    peak_arr = peak_vals[1:]
+
+    # Size filter: too small → noise/hot-pixel; too large → galaxy/nebula/trail
+    mask = (counts >= MIN_BLOB_PX) & (counts <= MAX_BLOB_PX)
+    cx_arr   = cx_arr[mask]
+    cy_arr   = cy_arr[mask]
+    peak_arr = peak_arr[mask]
+
+    # Sort by brightness, return top max_stars scaled to full resolution
+    order = np.argsort(peak_arr)[::-1][:max_stars]
+    return [(float(cx_arr[i]) * scale_x,
+             float(cy_arr[i]) * scale_y) for i in order]
+
+
+def _t(label: str, t0: float) -> float:
+    """Print a timing checkpoint to stderr and return current time."""
+    import time
+    now = time.perf_counter()
+    print(f"  [TIMING] {label}: {now - t0:.3f}s", file=sys.stderr)
+    return now
+
+
+def _adaptive_extract_stars(image_path: str) -> list:
+    """Extract stars, retrying with a lower threshold if too few are found.
+
+    Targets 30–300 stars — enough for a confident match without flooding the
+    solver with noise.  Returns a list of (x, y) full-resolution coordinates,
+    brightest first.
+    """
+    # Try progressively lower percentile thresholds until we have enough stars.
+    for pct in (99.5, 99.0, 98.5, 98.0, 97.0):
+        stars = _extract_stars_from_raw(image_path, max_stars=300,
+                                        threshold_percentile=pct)
+        if len(stars) >= 15:
+            print(f"  [TIMING] star extraction  ({len(stars)} stars, "
+                  f"threshold=p{pct})", file=sys.stderr)
+            return stars
+    # Last resort: return whatever we got from the lowest threshold
+    return stars
 
 
 def cmd_solve(image_path: str, ra_hint_deg: float, dec_hint_deg: float,
@@ -204,18 +294,26 @@ def cmd_solve(image_path: str, ra_hint_deg: float, dec_hint_deg: float,
        "scale_arcsec_per_pixel": ..., "logodds": ...}
     or
       {"success": false, "error": "..."}
+    Timing checkpoints are printed to stderr.
+
+    Three attempts are made before giving up, each with more relaxed params:
+      1. Tight:  given scale range + hint radius,  positional_noise=2 px
+      2. Wide:   2× scale range + 2× hint radius,  positional_noise=3 px
+      3. Blind:  full scale range,  no position hint, positional_noise=3 px
     """
+    import time
     import astrometry
+
+    t_total = time.perf_counter()
+    print(f"  [TIMING] solve started  image={image_path}", file=sys.stderr)
 
     if index_cache_dir is None:
         index_cache_dir = Path.home() / '.cache' / 'astrometry'
 
-    # Select scales that overlap with the provided pixel-scale range.
-    # series_4200 scale k roughly covers 2^(k/2)..2^((k+2)/2) arcsec/pix.
-    # We use scales 5-7 which cover ~1.7-7 arcsec/pix – broad enough for
-    # typical DSLR setups.
+    # scales 5-7 cover ~1–7 arcsec/pix — right for typical DSLR+telescope setups
     scales = {5, 6, 7}
 
+    t = time.perf_counter()
     try:
         index_files = astrometry.series_4200.index_files(
             cache_directory=index_cache_dir,
@@ -224,49 +322,115 @@ def cmd_solve(image_path: str, ra_hint_deg: float, dec_hint_deg: float,
     except Exception as e:
         print(json.dumps({"success": False, "error": f"Failed to load index files: {e}"}))
         sys.exit(0)
+    _t(f"index files loaded  ({len(index_files)} files)", t)
 
     if not index_files:
         print(json.dumps({"success": False, "error": "No index files available"}))
         sys.exit(0)
 
-    # Extract stars from the image
+    t = time.perf_counter()
     try:
-        stars = _extract_stars_from_raw(image_path)
+        stars = _adaptive_extract_stars(image_path)
     except Exception as e:
         print(json.dumps({"success": False, "error": f"Star extraction failed: {e}"}))
         sys.exit(0)
+    _t(f"star extraction total", t)
 
     if len(stars) < 5:
         print(json.dumps({"success": False,
                           "error": f"Too few stars detected ({len(stars)}), need at least 5"}))
         sys.exit(0)
 
+    # ── Attempt parameters (escalating relaxation) ────────────────────────────
+    #
+    # positional_noise_pixels: our stars come from a 4× downsampled image
+    # scaled back up, so each coordinate has ~±2 full-res pixel uncertainty.
+    # The default of 1.0 is too strict — we'd reject good matches near the
+    # centroid error boundary.
+    #
+    # scale range: widen on each retry so a miscalibrated focal length
+    # doesn't block every attempt.
+    #
+    # radius: mount pointing can be off by more than the nominal value after
+    # a long slew or if no sync has been done.
+    mid_scale   = (pixel_scale_low + pixel_scale_high) / 2.0
+    half_range  = (pixel_scale_high - pixel_scale_low) / 2.0
+
+    attempts = [
+        dict(
+            label="tight (given hint)",
+            size_hint=astrometry.SizeHint(pixel_scale_low, pixel_scale_high),
+            position_hint=astrometry.PositionHint(ra_hint_deg, dec_hint_deg,
+                                                   search_radius_deg),
+            noise=2.0,
+        ),
+        dict(
+            label="wide (2× scale + 2× radius)",
+            size_hint=astrometry.SizeHint(
+                max(0.1, mid_scale - half_range * 2),
+                mid_scale + half_range * 2,
+            ),
+            position_hint=astrometry.PositionHint(ra_hint_deg, dec_hint_deg,
+                                                   search_radius_deg * 2),
+            noise=3.0,
+        ),
+        dict(
+            label="blind (no position hint)",
+            size_hint=astrometry.SizeHint(
+                max(0.1, mid_scale - half_range * 3),
+                mid_scale + half_range * 3,
+            ),
+            position_hint=None,
+            noise=3.0,
+        ),
+    ]
+
+    solution = None
+    attempt_label = ""
+
     try:
         with astrometry.Solver(index_files) as solver:
-            solution = solver.solve(
-                stars=stars,
-                size_hint=astrometry.SizeHint(
-                    lower_arcsec_per_pixel=pixel_scale_low,
-                    upper_arcsec_per_pixel=pixel_scale_high,
-                ),
-                position_hint=astrometry.PositionHint(
-                    ra_deg=ra_hint_deg,
-                    dec_deg=dec_hint_deg,
-                    radius_deg=search_radius_deg,
-                ),
-                solution_parameters=astrometry.SolutionParameters(
-                    logodds_callback=lambda logodds_list: (
-                        astrometry.Action.STOP
-                        if max(logodds_list) > 40
-                        else astrometry.Action.CONTINUE
+            for attempt in attempts:
+                t = time.perf_counter()
+                sol = solver.solve(
+                    stars=stars,
+                    size_hint=attempt["size_hint"],
+                    position_hint=attempt["position_hint"],
+                    solution_parameters=astrometry.SolutionParameters(
+                        positional_noise_pixels=attempt["noise"],
+                        logodds_callback=lambda logodds_list: (
+                            astrometry.Action.STOP
+                            if max(logodds_list) > 40
+                            else astrometry.Action.CONTINUE
+                        ),
                     ),
-                ),
-            )
+                )
+                _t(f"attempt '{attempt['label']}'", t)
+
+                if sol.has_match():
+                    m = sol.best_match()
+                    # Sanity check: solution must be within 35° of the hint
+                    # (blind attempt has no constraint — always accept).
+                    if attempt["position_hint"] is not None:
+                        d_ra  = abs(m.center_ra_deg  - ra_hint_deg)
+                        d_dec = abs(m.center_dec_deg - dec_hint_deg)
+                        # RA wraps at 360°
+                        d_ra = min(d_ra, 360.0 - d_ra)
+                        dist = (d_ra ** 2 + d_dec ** 2) ** 0.5
+                        if dist > 35.0:
+                            print(f"  [TIMING] attempt '{attempt['label']}' rejected "
+                                  f"(solution {dist:.1f}° from hint)", file=sys.stderr)
+                            continue
+                    solution = sol
+                    attempt_label = attempt["label"]
+                    break
     except Exception as e:
         print(json.dumps({"success": False, "error": f"Solver error: {e}"}))
         sys.exit(0)
 
-    if solution.has_match():
+    _t("TOTAL", t_total)
+
+    if solution is not None and solution.has_match():
         m = solution.best_match()
         print(json.dumps({
             "success": True,
@@ -274,9 +438,10 @@ def cmd_solve(image_path: str, ra_hint_deg: float, dec_hint_deg: float,
             "dec_deg": m.center_dec_deg,
             "scale_arcsec_per_pixel": m.scale_arcsec_per_pixel,
             "logodds": m.logodds,
+            "attempt": attempt_label,
         }))
     else:
-        print(json.dumps({"success": False, "error": "No solution found"}))
+        print(json.dumps({"success": False, "error": "No solution found after all attempts"}))
 
 
 if __name__ == '__main__':
