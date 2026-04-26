@@ -11,6 +11,7 @@ Usage:
 
 import sys
 import json
+import zlib
 import numpy as np
 from pathlib import Path
 
@@ -51,6 +52,67 @@ def _fits_to_pil(input_path: str, stretch_lo: float = 0.1, stretch_hi: float = 9
     return Image.fromarray(stretched, mode='L')
 
 
+def _tiff_to_pil(path: str, stretch_lo: float = 0.1, stretch_hi: float = 99.9,
+                 half_size: bool = False):
+    """Read our 16-bit RGB TIFF (uncompressed or DEFLATE) and return a PIL Image (8-bit, stretched).
+
+    Uses only struct + zlib + numpy — does NOT call rawpy or PIL to open the file,
+    so it works correctly on our custom TIFF that Pillow silently truncates to 8-bit.
+    """
+    import struct
+    from PIL import Image
+
+    with open(path, 'rb') as f:
+        raw = f.read()
+
+    # TIFF header
+    bom = raw[0:2]
+    endian = '<' if bom == b'II' else '>'
+    if struct.unpack_from(f'{endian}H', raw, 2)[0] != 42:
+        raise ValueError(f'Not a TIFF file: {path}')
+
+    ifd_off = struct.unpack_from(f'{endian}I', raw, 4)[0]
+    n_entries = struct.unpack_from(f'{endian}H', raw, ifd_off)[0]
+
+    tags: dict = {}
+    type_size = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8}
+    for i in range(n_entries):
+        base = ifd_off + 2 + 12 * i
+        tag, typ, count = struct.unpack_from(f'{endian}HHI', raw, base)
+        tsz = type_size.get(typ, 4)
+        if count * tsz <= 4:
+            # Value stored directly in the 4-byte field (left-justified, LE)
+            val = struct.unpack_from(f'{endian}H', raw, base + 8)[0] if typ == 3 \
+                  else struct.unpack_from(f'{endian}I', raw, base + 8)[0]
+        else:
+            off = struct.unpack_from(f'{endian}I', raw, base + 8)[0]
+            val = struct.unpack_from(f'{endian}' + ('H' if typ == 3 else 'I') * count, raw, off)
+        tags[tag] = val
+
+    width           = tags[256]
+    height          = tags[257]
+    compression     = tags.get(259, 1)
+    strip_offset    = tags[273]
+    strip_bytecount = tags[279]
+
+    payload = raw[strip_offset:strip_offset + strip_bytecount]
+    if compression in (8, 32946):   # DEFLATE / Adobe Deflate
+        payload = zlib.decompress(payload)
+    elif compression != 1:
+        raise ValueError(f'Unsupported TIFF compression={compression} in {path}')
+
+    arr = np.frombuffer(payload, dtype=f'{endian}u2').reshape(height, width, 3).astype(np.float32)
+
+    if half_size:
+        arr = arr[::2, ::2, :]
+
+    out = np.empty(arr.shape, dtype=np.uint8)
+    for c in range(3):
+        out[:, :, c] = _stretch(arr[:, :, c], stretch_lo, stretch_hi)
+
+    return Image.fromarray(out, mode='RGB')
+
+
 def cmd_thumbnail(input_path: str, output_path: str, max_size: int = 400):
     """Generate a small JPEG thumbnail."""
     import rawpy
@@ -61,6 +123,8 @@ def cmd_thumbnail(input_path: str, output_path: str, max_size: int = 400):
 
     if ext in ('.fits', '.fit'):
         img = _fits_to_pil(input_path)
+    elif ext in ('.tif', '.tiff'):
+        img = _tiff_to_pil(input_path, half_size=True)
     else:
         # Try embedded thumbnail first (fast)
         try:
@@ -84,6 +148,8 @@ def cmd_preview(input_path: str, output_path: str,
 
     if ext in ('.fits', '.fit'):
         img = _fits_to_pil(input_path, stretch_lo, stretch_hi)
+    elif ext in ('.tif', '.tiff'):
+        img = _tiff_to_pil(input_path, stretch_lo, stretch_hi)
     else:
         img = _raw_to_pil(input_path, half_size=False)
 
@@ -130,18 +196,19 @@ def cmd_fits(input_path: str, output_path: str,
 
 
 def _write_tiff_16bit_rgb(path: str, rgb: np.ndarray, description: str = '') -> None:
-    """Write a 16-bit RGB TIFF using only numpy + struct (no external dependencies).
+    """Write a 16-bit RGB TIFF using only numpy + struct + zlib (no external dependencies).
 
-    Produces a valid TIFF 6.0, uncompressed, little-endian, chunky RGB with
-    FITS-card metadata stored in the ImageDescription tag so Siril can read it.
+    Produces a valid TIFF 6.0, DEFLATE-compressed (tag 259=8), little-endian,
+    chunky RGB with FITS-card metadata in ImageDescription so Siril can read it.
     """
     import struct
 
     h, w = rgb.shape[:2]
-    img_data   = rgb.astype('<u2').tobytes()          # LE uint16, RGBRGB…
-    bps_block  = struct.pack('<3H', 16, 16, 16)       # BitsPerSample R/G/B
+    raw_pixels = rgb.astype('<u2').tobytes()           # LE uint16, RGBRGB…
+    img_data   = zlib.compress(raw_pixels, 6)          # DEFLATE level 6
+    bps_block  = struct.pack('<3H', 16, 16, 16)        # BitsPerSample R/G/B
     desc_block = description.encode('ascii', errors='replace') + b'\x00'
-    res_block  = struct.pack('<2I', 72, 1)            # rational 72/1 dpi (X & Y)
+    res_block  = struct.pack('<2I', 72, 1)             # rational 72/1 dpi (X & Y)
 
     # IFD entries – (tag, tiff_type, count, direct_value_or_None)
     # Types: 2=ASCII  3=SHORT(u16)  4=LONG(u32)  5=RATIONAL(2×u32)
@@ -150,13 +217,13 @@ def _write_tiff_16bit_rgb(path: str, rgb: np.ndarray, description: str = '') -> 
         (256, 4, 1, w),                   # ImageWidth
         (257, 4, 1, h),                   # ImageLength
         (258, 3, 3, None),                # BitsPerSample  → bps_block
-        (259, 3, 1, 1),                   # Compression    = none
+        (259, 3, 1, 8),                   # Compression    = DEFLATE
         (262, 3, 1, 2),                   # PhotometricInterp = RGB
         (270, 2, len(desc_block), None),  # ImageDescription → desc_block
         (273, 4, 1, None),                # StripOffsets   → img_data
         (277, 3, 1, 3),                   # SamplesPerPixel = 3
         (278, 4, 1, h),                   # RowsPerStrip   = whole image
-        (279, 4, 1, len(img_data)),       # StripByteCounts
+        (279, 4, 1, len(img_data)),       # StripByteCounts (compressed size)
         (282, 5, 1, None),                # XResolution    → res_block
         (283, 5, 1, None),                # YResolution    → res_block
         (284, 3, 1, 1),                   # PlanarConfiguration = chunky
@@ -189,7 +256,7 @@ def _write_tiff_16bit_rgb(path: str, rgb: np.ndarray, description: str = '') -> 
     buf += desc_block
     buf += res_block              # XResolution
     buf += res_block              # YResolution
-    buf += img_data
+    buf += img_data               # compressed pixel data
 
     with open(path, 'wb') as f:
         f.write(buf)

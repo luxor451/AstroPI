@@ -33,7 +33,7 @@ pub async fn ping() -> impl Responder {
 #[get("/events")]
 pub async fn sse_events(data: web::Data<AppState>) -> impl Responder {
     let rx = data.event_sender.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|item| async move {
+    let events = BroadcastStream::new(rx).filter_map(|item| async move {
         match item {
             Ok(msg) => Some(Ok::<_, actix_web::Error>(web::Bytes::from(format!(
                 "data: {}\n\n",
@@ -43,10 +43,22 @@ pub async fn sse_events(data: web::Data<AppState>) -> impl Responder {
         }
     });
 
+    // Send a SSE comment every 15 s so the connection is not dropped during
+    // long exposures where no real event is produced.
+    let heartbeat = futures::stream::unfold((), |_| async {
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        Some((
+            Ok::<_, actix_web::Error>(web::Bytes::from_static(b": keepalive\n\n")),
+            (),
+        ))
+    });
+
+    let merged = futures::stream::select(Box::pin(events), Box::pin(heartbeat));
+
     HttpResponse::Ok()
         .insert_header(("Content-Type", "text/event-stream"))
         .insert_header(("Cache-Control", "no-cache"))
-        .streaming(stream)
+        .streaming(merged)
 }
 
 #[get("/status")]
