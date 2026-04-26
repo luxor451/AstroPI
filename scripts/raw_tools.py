@@ -89,6 +89,7 @@ def _read_tiff_array(path: str) -> np.ndarray:
     compression     = tags.get(259, 1)
     strip_offset    = tags[273]
     strip_bytecount = tags[279]
+    spp             = tags.get(277, 1)  # SamplesPerPixel
 
     payload = raw[strip_offset:strip_offset + strip_bytecount]
     if compression in (8, 32946):
@@ -96,21 +97,29 @@ def _read_tiff_array(path: str) -> np.ndarray:
     elif compression != 1:
         raise ValueError(f'Unsupported TIFF compression={compression} in {path}')
 
-    return np.frombuffer(payload, dtype=f'{endian}u2').reshape(height, width, 3)
+    arr = np.frombuffer(payload, dtype=f'{endian}u2')
+    if spp == 1:
+        return arr.reshape(height, width)       # (H, W) — Bayer or grayscale
+    return arr.reshape(height, width, spp)      # (H, W, C) — RGB legacy
 
 
 def _tiff_to_pil(path: str, stretch_lo: float = 0.1, stretch_hi: float = 99.9,
                  half_size: bool = False):
-    """Read our 16-bit RGB TIFF and return a PIL Image (8-bit, percentile-stretched)."""
+    """Read a 16-bit TIFF (single-channel Bayer or RGB) and return a stretched 8-bit PIL Image."""
     from PIL import Image
 
     arr = _read_tiff_array(path).astype(np.float32)
-    if half_size:
-        arr = arr[::2, ::2, :]
-    out = np.empty(arr.shape, dtype=np.uint8)
-    for c in range(3):
-        out[:, :, c] = _stretch(arr[:, :, c], stretch_lo, stretch_hi)
-    return Image.fromarray(out, mode='RGB')
+    arr = arr[::2, ::2] if half_size else arr   # works for both 2-D and 3-D
+
+    if arr.ndim == 2:
+        # Single-channel Bayer — show as grayscale
+        return Image.fromarray(_stretch(arr, stretch_lo, stretch_hi), mode='L')
+    else:
+        # Legacy RGB (3-channel)
+        out = np.empty(arr.shape, dtype=np.uint8)
+        for c in range(arr.shape[2]):
+            out[:, :, c] = _stretch(arr[:, :, c], stretch_lo, stretch_hi)
+        return Image.fromarray(out, mode='RGB')
 
 
 def cmd_thumbnail(input_path: str, output_path: str, max_size: int = 400):
@@ -195,68 +204,58 @@ def cmd_fits(input_path: str, output_path: str,
     fits.HDUList([hdu]).writeto(output_path, overwrite=True)
 
 
-def _write_tiff_16bit_rgb(path: str, rgb: np.ndarray, description: str = '') -> None:
-    """Write a 16-bit RGB TIFF using only numpy + struct + zlib (no external dependencies).
+def _write_tiff_16bit_gray(path: str, arr: np.ndarray, description: str = '') -> None:
+    """Write a 16-bit single-channel TIFF with fast DEFLATE compression (level 1).
 
-    Produces a valid TIFF 6.0, DEFLATE-compressed (tag 259=8), little-endian,
-    chunky RGB with FITS-card metadata in ImageDescription so Siril can read it.
+    Stores raw Bayer sensor data exactly as it came off the sensor — no debayering,
+    no tone curve.  File size is ~3× smaller than a debayered RGB TIFF and the
+    compression step is ~10× faster (level 1 vs 6).  Siril reads BAYERPAT from
+    the FITS cards in ImageDescription and debayers automatically during stacking.
     """
     import struct
 
-    h, w = rgb.shape[:2]
-    raw_pixels = rgb.astype('<u2').tobytes()           # LE uint16, RGBRGB…
-    img_data   = zlib.compress(raw_pixels, 6)          # DEFLATE level 6
-    bps_block  = struct.pack('<3H', 16, 16, 16)        # BitsPerSample R/G/B
+    h, w   = arr.shape[:2]
+    pixels = arr.astype('<u2').tobytes()
+    img_data   = zlib.compress(pixels, 1)              # level 1 = fast
     desc_block = description.encode('ascii', errors='replace') + b'\x00'
-    res_block  = struct.pack('<2I', 72, 1)             # rational 72/1 dpi (X & Y)
+    res_block  = struct.pack('<2I', 72, 1)             # RATIONAL 72/1 dpi
 
-    # IFD entries – (tag, tiff_type, count, direct_value_or_None)
-    # Types: 2=ASCII  3=SHORT(u16)  4=LONG(u32)  5=RATIONAL(2×u32)
-    # None → value field will hold an offset to extra data below.
+    # BitsPerSample=16 fits directly in the IFD value field (count=1, 2 bytes ≤ 4).
     ifd_def = [
         (256, 4, 1, w),                   # ImageWidth
         (257, 4, 1, h),                   # ImageLength
-        (258, 3, 3, None),                # BitsPerSample  → bps_block
-        (259, 3, 1, 8),                   # Compression    = DEFLATE
-        (262, 3, 1, 2),                   # PhotometricInterp = RGB
+        (258, 3, 1, 16),                  # BitsPerSample = 16  (direct)
+        (259, 3, 1, 8),                   # Compression   = DEFLATE
+        (262, 3, 1, 1),                   # PhotometricInterp = BlackIsZero
         (270, 2, len(desc_block), None),  # ImageDescription → desc_block
         (273, 4, 1, None),                # StripOffsets   → img_data
-        (277, 3, 1, 3),                   # SamplesPerPixel = 3
-        (278, 4, 1, h),                   # RowsPerStrip   = whole image
-        (279, 4, 1, len(img_data)),       # StripByteCounts (compressed size)
+        (277, 3, 1, 1),                   # SamplesPerPixel = 1
+        (278, 4, 1, h),                   # RowsPerStrip
+        (279, 4, 1, len(img_data)),       # StripByteCounts
         (282, 5, 1, None),                # XResolution    → res_block
         (283, 5, 1, None),                # YResolution    → res_block
         (284, 3, 1, 1),                   # PlanarConfiguration = chunky
         (296, 3, 1, 2),                   # ResolutionUnit = inch
     ]
-    n = len(ifd_def)
+    n          = len(ifd_def)
+    extra_base = 14 + 12 * n              # header(8)+count(2)+entries(12n)+nextIFD(4)
+    desc_off   = extra_base
+    xres_off   = desc_off + len(desc_block)
+    yres_off   = xres_off + 8             # RATIONAL = 2×LONG = 8 bytes
+    img_off    = yres_off + 8
 
-    # Byte layout:
-    #   0  – 7    : TIFF header (8 bytes)
-    #   8  – 9    : IFD entry count (2 bytes)
-    #  10  – 10+12n-1 : IFD entries
-    #  10+12n – +3: next-IFD offset = 0
-    # extra_base = 8 + 2 + 12*n + 4
-    extra_base = 14 + 12 * n
-    bps_off  = extra_base
-    desc_off = bps_off  + len(bps_block)
-    xres_off = desc_off + len(desc_block)
-    yres_off = xres_off + len(res_block)
-    img_off  = yres_off + len(res_block)
+    offsets = {270: desc_off, 273: img_off, 282: xres_off, 283: yres_off}
 
-    offsets = {258: bps_off, 270: desc_off, 273: img_off, 282: xres_off, 283: yres_off}
-
-    buf = bytearray()
-    buf += struct.pack('<2sHI', b'II', 42, 8)   # header
-    buf += struct.pack('<H', n)                  # entry count
+    buf  = bytearray()
+    buf += struct.pack('<2sHI', b'II', 42, 8)
+    buf += struct.pack('<H', n)
     for tag, typ, count, val in ifd_def:
         buf += struct.pack('<HHII', tag, typ, count, offsets[tag] if val is None else val)
-    buf += struct.pack('<I', 0)   # next IFD = none
-    buf += bps_block
+    buf += struct.pack('<I', 0)
     buf += desc_block
-    buf += res_block              # XResolution
-    buf += res_block              # YResolution
-    buf += img_data               # compressed pixel data
+    buf += res_block   # XResolution
+    buf += res_block   # YResolution
+    buf += img_data
 
     with open(path, 'wb') as f:
         f.write(buf)
@@ -267,21 +266,19 @@ def cmd_tiff(input_path: str, output_path: str,
              ra_deg: float = None, dec_deg: float = None,
              focal_mm: float = None, pixel_size_um: float = None,
              exptime_s: float = None, iso: int = None):
-    """Convert a RAW to a 16-bit linear debayered TIFF with Siril-compatible FITS metadata.
+    """Convert a RAW file to a 16-bit single-channel Bayer TIFF with Siril FITS metadata.
 
-    No external packages beyond rawpy and numpy are required.
+    Saves the raw Bayer sensor data without debayering — the same approach used by
+    ZWO ASI Air.  The file is ~3× smaller than a debayered RGB TIFF and compresses
+    ~10× faster (DEFLATE level 1).  Siril reads BAYERPAT from the embedded FITS
+    header and debayers automatically during the stacking/processing step.
     """
     import rawpy
 
     with rawpy.imread(input_path) as raw:
-        rgb = raw.postprocess(
-            use_camera_wb=True,
-            output_bps=16,
-            no_auto_bright=True,
-            gamma=(1, 1),     # linear – no tone curve, preserves full dynamic range
-        )  # (H, W, 3) uint16
+        bayer      = raw.raw_image_visible.copy()               # (H, W) uint16
+        bayer_pat  = raw.color_desc.decode('ascii', errors='replace')[:4]
 
-    # Build FITS-card header string for Siril's ImageDescription reader.
     def _card(key, value, comment=''):
         if isinstance(value, bool):
             v = f"{'T' if value else 'F':>20}"
@@ -294,27 +291,27 @@ def cmd_tiff(input_path: str, output_path: str,
         return (f"{key:<8}= {v} / {comment}")[:80].ljust(80)
 
     cards = [
-        _card('SIMPLE',  True,         'FITS-compliant header'),
-        _card('BITPIX',  16,           'Bits per data value'),
-        _card('NAXIS',   3,            'Number of data axes'),
-        _card('NAXIS1',  rgb.shape[1], 'Image width in pixels'),
-        _card('NAXIS2',  rgb.shape[0], 'Image height in pixels'),
-        _card('NAXIS3',  3,            'Number of channels (RGB)'),
-        _card('PROGRAM', 'AstroPI',    'Capture software'),
+        _card('SIMPLE',   True,           'FITS-compliant header'),
+        _card('BITPIX',   16,             'Bits per data value'),
+        _card('NAXIS',    2,              'Number of data axes (single-channel Bayer)'),
+        _card('NAXIS1',   bayer.shape[1], 'Image width in pixels'),
+        _card('NAXIS2',   bayer.shape[0], 'Image height in pixels'),
+        _card('BAYERPAT', bayer_pat,      'Bayer color filter array pattern'),
+        _card('PROGRAM',  'AstroPI',      'Capture software'),
     ]
     if object_name:
-        cards.append(_card('OBJECT',   object_name,       'Target object name'))
+        cards.append(_card('OBJECT',   object_name,           'Target object name'))
     if exptime_s is not None:
-        cards.append(_card('EXPTIME',  float(exptime_s),  '[s] Exposure duration'))
+        cards.append(_card('EXPTIME',  float(exptime_s),      '[s] Exposure duration'))
     if iso is not None:
-        cards.append(_card('ISOSPEED', int(iso),          'ISO/gain setting'))
+        cards.append(_card('ISOSPEED', int(iso),              'ISO/gain setting'))
     if focal_mm is not None:
-        cards.append(_card('FOCAL',    float(focal_mm),   '[mm] Telescope focal length'))
+        cards.append(_card('FOCAL',    float(focal_mm),       '[mm] Telescope focal length'))
     if pixel_size_um is not None:
-        cards.append(_card('XPIXSZ',   float(pixel_size_um), '[um] Pixel size X'))
-        cards.append(_card('YPIXSZ',   float(pixel_size_um), '[um] Pixel size Y'))
+        cards.append(_card('XPIXSZ',   float(pixel_size_um),  '[um] Pixel size X'))
+        cards.append(_card('YPIXSZ',   float(pixel_size_um),  '[um] Pixel size Y'))
     if ra_deg is not None:
-        ra_h = ra_deg / 15.0
+        ra_h   = ra_deg / 15.0
         ra_hms = '{:02.0f}:{:02.0f}:{:05.2f}'.format(
             int(ra_h), int((ra_h % 1) * 60), ((ra_h * 60) % 1) * 60)
         cards.append(_card('RA',       float(ra_deg), '[deg] Mount RA J2000'))
@@ -328,7 +325,7 @@ def cmd_tiff(input_path: str, output_path: str,
         cards.append(_card('OBJCTDEC', dec_dms,        'Mount Dec DD:MM:SS.s'))
     cards.append(('END' + ' ' * 77)[:80])
 
-    _write_tiff_16bit_rgb(output_path, rgb, ''.join(cards))
+    _write_tiff_16bit_gray(output_path, bayer, ''.join(cards))
 
 
 def cmd_fitshdr(input_path: str):
@@ -388,8 +385,12 @@ def _extract_stars_from_raw(image_path: str, max_stars: int = 300,
     elif ext in ('.tif', '.tiff'):
         arr16 = _read_tiff_array(image_path)
         full_h, full_w = arr16.shape[:2]
-        # Green channel captures the most stellar detail in a debayered linear image.
-        gray_full = arr16[:, :, 1].astype(np.float32)
+        if arr16.ndim == 2:
+            # Single-channel Bayer — use as-is (stars show up fine in raw Bayer)
+            gray_full = arr16.astype(np.float32)
+        else:
+            # Legacy RGB — use green channel (most sensitive to stars)
+            gray_full = arr16[:, :, 1].astype(np.float32)
         h2, w2 = full_h // DOWNSAMPLE, full_w // DOWNSAMPLE
         gray = gray_full[:h2 * DOWNSAMPLE, :w2 * DOWNSAMPLE] \
                    .reshape(h2, DOWNSAMPLE, w2, DOWNSAMPLE).mean(axis=(1, 3))
