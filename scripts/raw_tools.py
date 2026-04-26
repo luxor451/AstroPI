@@ -6,6 +6,7 @@ Usage:
   raw_tools.py preview   <input> <output> [stretch_percent]
   raw_tools.py fits      <input> <output>
   raw_tools.py fitshdr   <input>             # print FITS header as JSON
+  raw_tools.py tiff      <input> <output> [object] [ra_deg] [dec_deg] [focal_mm] [pixel_um] [exptime] [iso]
 """
 
 import sys
@@ -126,6 +127,82 @@ def cmd_fits(input_path: str, output_path: str,
         h['OBJCTDEC'] = (dec_dms, 'Mount Dec in DD:MM:SS')
     h['COMMENT'] = f'Converted from {Path(input_path).name} by AstroPI'
     fits.HDUList([hdu]).writeto(output_path, overwrite=True)
+
+
+def cmd_tiff(input_path: str, output_path: str,
+             object_name: str = '',
+             ra_deg: float = None, dec_deg: float = None,
+             focal_mm: float = None, pixel_size_um: float = None,
+             exptime_s: float = None, iso: int = None):
+    """Convert a RAW to a 16-bit linear debayered TIFF with Siril-compatible FITS metadata."""
+    import rawpy
+    try:
+        import tifffile
+    except ImportError:
+        print(
+            "tifffile not installed – run: pip3 install tifffile",
+            file=sys.stderr,
+        )
+        raise
+
+    with rawpy.imread(input_path) as raw:
+        rgb = raw.postprocess(
+            use_camera_wb=True,
+            output_bps=16,
+            no_auto_bright=True,
+            gamma=(1, 1),          # linear – no tone curve
+        )  # (H, W, 3) uint16
+
+    # Build standard FITS header cards embedded in TIFF ImageDescription.
+    # Siril reads this tag and extracts focal length, pixel size, and coordinates.
+    def _card(key, value, comment=''):
+        if isinstance(value, bool):
+            v = f"{'T' if value else 'F':>20}"
+        elif isinstance(value, float):
+            v = f"{value:>20.6f}"
+        elif isinstance(value, int):
+            v = f"{value:>20d}"
+        else:
+            v = f"'{str(value):<18}'"
+        return (f"{key:<8}= {v} / {comment}")[:80].ljust(80)
+
+    cards = [
+        _card('SIMPLE',  True,         'FITS-compliant header'),
+        _card('BITPIX',  16,           'Bits per data value'),
+        _card('NAXIS',   3,            'Number of data axes'),
+        _card('NAXIS1',  rgb.shape[1], 'Image width in pixels'),
+        _card('NAXIS2',  rgb.shape[0], 'Image height in pixels'),
+        _card('NAXIS3',  3,            'Number of channels (RGB)'),
+        _card('PROGRAM', 'AstroPI',    'Capture software'),
+    ]
+    if object_name:
+        cards.append(_card('OBJECT', object_name, 'Target object name'))
+    if exptime_s is not None:
+        cards.append(_card('EXPTIME', float(exptime_s), '[s] Exposure duration'))
+    if iso is not None:
+        cards.append(_card('ISOSPEED', int(iso), 'ISO/gain setting'))
+    if focal_mm is not None:
+        cards.append(_card('FOCAL', float(focal_mm), '[mm] Telescope focal length'))
+    if pixel_size_um is not None:
+        cards.append(_card('XPIXSZ', float(pixel_size_um), '[um] Pixel size X'))
+        cards.append(_card('YPIXSZ', float(pixel_size_um), '[um] Pixel size Y'))
+    if ra_deg is not None:
+        ra_h = ra_deg / 15.0
+        ra_hms = '{:02.0f}:{:02.0f}:{:05.2f}'.format(
+            int(ra_h), int((ra_h % 1) * 60), ((ra_h * 60) % 1) * 60)
+        cards.append(_card('RA',      float(ra_deg), '[deg] Mount RA J2000'))
+        cards.append(_card('OBJCTRA', ra_hms,        'Mount RA  HH:MM:SS.ss'))
+    if dec_deg is not None:
+        sign = '+' if dec_deg >= 0 else '-'
+        adec = abs(dec_deg)
+        dec_dms = '{}{:02.0f}:{:02.0f}:{:04.1f}'.format(
+            sign, int(adec), int((adec % 1) * 60), ((adec * 60) % 1) * 60)
+        cards.append(_card('DEC',      float(dec_deg), '[deg] Mount Dec J2000'))
+        cards.append(_card('OBJCTDEC', dec_dms,        'Mount Dec DD:MM:SS.s'))
+    cards.append(('END' + ' ' * 77)[:80])
+
+    header_str = ''.join(cards)
+    tifffile.imwrite(output_path, rgb, description=header_str, photometric='rgb')
 
 
 def cmd_fitshdr(input_path: str):
@@ -462,6 +539,19 @@ if __name__ == '__main__':
         ra   = float(sys.argv[5]) if len(sys.argv) > 5 else None
         dec  = float(sys.argv[6]) if len(sys.argv) > 6 else None
         cmd_fits(sys.argv[2], sys.argv[3], obj, ra, dec)
+    elif cmd == 'tiff':
+        def _opt_float(idx): return float(sys.argv[idx]) if len(sys.argv) > idx and sys.argv[idx] else None
+        def _opt_int(idx):   return int(sys.argv[idx])   if len(sys.argv) > idx and sys.argv[idx] else None
+        cmd_tiff(
+            sys.argv[2], sys.argv[3],
+            object_name   = sys.argv[4] if len(sys.argv) > 4 else '',
+            ra_deg        = _opt_float(5),
+            dec_deg       = _opt_float(6),
+            focal_mm      = _opt_float(7),
+            pixel_size_um = _opt_float(8),
+            exptime_s     = _opt_float(9),
+            iso           = _opt_int(10),
+        )
     elif cmd == 'fitshdr':
         cmd_fitshdr(sys.argv[2])
     elif cmd == 'solve':

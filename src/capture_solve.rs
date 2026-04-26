@@ -212,7 +212,7 @@ pub struct MeridianFlipConfig {
 
 pub async fn run_sequence(
     camera: &CameraController,
-    settings: &CaptureSettings, // Base settings (ISO, Save dir root)
+    settings: &CaptureSettings,
     sequence: &[SequenceItem],
     target: &str,
     date_str: &str,
@@ -223,6 +223,8 @@ pub async fn run_sequence(
     should_pause: &Arc<AtomicBool>,
     indi_client: Option<&IndiClient>,
     flip_config: Option<&MeridianFlipConfig>,
+    focal_mm: f64,
+    pixel_size_um: f64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Initial message handled by caller to ensure immediate feedback
     // println!("Starting sequence (resuming from {})...", resume_from_idx);
@@ -364,6 +366,17 @@ pub async fn run_sequence(
             println!("{}", msg);
             let _ = sender.send(msg);
 
+            // Snapshot actual mount coordinates just before the shutter opens.
+            let (mount_ra_deg, mount_dec_deg) = if let Some(client) = indi_client {
+                let (ra_h, dec) = client.get_coordinates().await;
+                (Some(ra_h * 15.0), Some(dec))
+            } else {
+                (
+                    flip_config.map(|c| c.target_ra_h * 15.0),
+                    flip_config.map(|c| c.target_dec_deg),
+                )
+            };
+
             // Note: Aperture is passed as None to keep current or can be wired up if needed
             let path = camera
                 .take_photo(
@@ -400,9 +413,12 @@ pub async fn run_sequence(
                 let date_bg = date_str.to_string();
                 let idx = current_global_idx;
                 let total = total_count;
-                // Capture mount position for FITS header (from flip config if available)
-                let ra_h_bg   = flip_config.map(|c| c.target_ra_h);
-                let dec_deg_bg = flip_config.map(|c| c.target_dec_deg);
+                let ra_bg      = mount_ra_deg;
+                let dec_bg     = mount_dec_deg;
+                let focal_bg   = focal_mm;
+                let pixel_bg   = pixel_size_um;
+                let exp_bg     = exposure;
+                let iso_bg     = settings.iso;
 
                 prev_post_task = Some(tokio::task::spawn_blocking(move || {
                     // Rename file to include target and date
@@ -432,48 +448,39 @@ pub async fn run_sequence(
                                 }
                             }
 
-                            // Auto-convert RAW to FITS with mount position in header
-                            let fits_dir = PathBuf::from("imgs/fits");
-                            if std::fs::create_dir_all(&fits_dir).is_ok() {
-                                let stem = new_path
-                                    .file_stem()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .into_owned();
-                                let fits_path = fits_dir.join(format!("{stem}.fits"));
-                                if !fits_path.exists() {
-                                    let ra_str = ra_h_bg
-                                        .map(|h| format!("{:.6}", h * 15.0)) // hours → degrees
-                                        .unwrap_or_default();
-                                    let dec_str = dec_deg_bg
-                                        .map(|d| format!("{:.6}", d))
-                                        .unwrap_or_default();
-                                    let mut args: Vec<&str> = vec![
-                                        "fits",
+                            // Auto-convert RAW → 16-bit TIFF with mount metadata for Siril
+                            let tiff_path = new_path.with_extension("tif");
+                            if !tiff_path.exists() {
+                                let ra_str  = ra_bg .map(|v| format!("{v:.6}")).unwrap_or_default();
+                                let dec_str = dec_bg.map(|v| format!("{v:.6}")).unwrap_or_default();
+                                let out = std::process::Command::new("python3")
+                                    .arg("scripts/raw_tools.py")
+                                    .args([
+                                        "tiff",
                                         new_path.to_str().unwrap_or(""),
-                                        fits_path.to_str().unwrap_or(""),
+                                        tiff_path.to_str().unwrap_or(""),
                                         &target_bg,
-                                    ];
-                                    if !ra_str.is_empty() {
-                                        args.push(&ra_str);
-                                        args.push(&dec_str);
+                                        &ra_str,
+                                        &dec_str,
+                                        &format!("{focal_bg:.3}"),
+                                        &format!("{pixel_bg:.3}"),
+                                        &format!("{exp_bg:.3}"),
+                                        &format!("{iso_bg}"),
+                                    ])
+                                    .output();
+                                match out {
+                                    Ok(o) if o.status.success() => {
+                                        let stem = tiff_path
+                                            .file_name()
+                                            .unwrap_or_default()
+                                            .to_string_lossy();
+                                        let _ = sender_bg.send(format!("TIFF saved: {stem}"));
                                     }
-                                    let out = std::process::Command::new("python3")
-                                        .arg("scripts/raw_tools.py")
-                                        .args(&args)
-                                        .output();
-                                    match out {
-                                        Ok(o) if o.status.success() => {
-                                            let _ = sender_bg.send(
-                                                format!("FITS saved: {stem}.fits"),
-                                            );
-                                        }
-                                        Ok(o) => eprintln!(
-                                            "FITS conversion failed: {}",
-                                            String::from_utf8_lossy(&o.stderr)
-                                        ),
-                                        Err(e) => eprintln!("raw_tools.py spawn error: {e}"),
-                                    }
+                                    Ok(o) => eprintln!(
+                                        "TIFF conversion failed: {}",
+                                        String::from_utf8_lossy(&o.stderr)
+                                    ),
+                                    Err(e) => eprintln!("raw_tools.py spawn error: {e}"),
                                 }
                             }
                         }

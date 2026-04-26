@@ -144,6 +144,8 @@ fn build_folder(abs_path: &Path, base: &Path) -> GalleryFolder {
                 "raw"
             } else if matches!(ext.as_str(), "fits" | "fit") {
                 "fits"
+            } else if matches!(ext.as_str(), "tiff" | "tif") {
+                "tiff"
             } else {
                 "jpeg"
             };

@@ -335,6 +335,8 @@ pub async fn handle_start_sequence(
                 &data_clone.should_pause,
                 indi_ref,
                 flip_config.as_ref(),
+                cam_config.focal_length_mm,
+                cam_config.pixel_size_micron,
             )
             .await
             .map_err(|e| e.to_string());
