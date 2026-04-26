@@ -52,36 +52,32 @@ def _fits_to_pil(input_path: str, stretch_lo: float = 0.1, stretch_hi: float = 9
     return Image.fromarray(stretched, mode='L')
 
 
-def _tiff_to_pil(path: str, stretch_lo: float = 0.1, stretch_hi: float = 99.9,
-                 half_size: bool = False):
-    """Read our 16-bit RGB TIFF (uncompressed or DEFLATE) and return a PIL Image (8-bit, stretched).
+def _read_tiff_array(path: str) -> np.ndarray:
+    """Return the pixel data of our 16-bit RGB TIFF as a (H, W, 3) uint16 array.
 
-    Uses only struct + zlib + numpy — does NOT call rawpy or PIL to open the file,
-    so it works correctly on our custom TIFF that Pillow silently truncates to 8-bit.
+    Handles both uncompressed (compression=1) and DEFLATE (compression=8/32946).
+    Uses only struct + zlib + numpy so it works on any platform without tifffile.
     """
     import struct
-    from PIL import Image
 
     with open(path, 'rb') as f:
         raw = f.read()
 
-    # TIFF header
     bom = raw[0:2]
     endian = '<' if bom == b'II' else '>'
     if struct.unpack_from(f'{endian}H', raw, 2)[0] != 42:
         raise ValueError(f'Not a TIFF file: {path}')
 
-    ifd_off = struct.unpack_from(f'{endian}I', raw, 4)[0]
-    n_entries = struct.unpack_from(f'{endian}H', raw, ifd_off)[0]
+    ifd_off    = struct.unpack_from(f'{endian}I', raw, 4)[0]
+    n_entries  = struct.unpack_from(f'{endian}H', raw, ifd_off)[0]
+    type_size  = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8}
 
     tags: dict = {}
-    type_size = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8}
     for i in range(n_entries):
         base = ifd_off + 2 + 12 * i
         tag, typ, count = struct.unpack_from(f'{endian}HHI', raw, base)
         tsz = type_size.get(typ, 4)
         if count * tsz <= 4:
-            # Value stored directly in the 4-byte field (left-justified, LE)
             val = struct.unpack_from(f'{endian}H', raw, base + 8)[0] if typ == 3 \
                   else struct.unpack_from(f'{endian}I', raw, base + 8)[0]
         else:
@@ -89,27 +85,31 @@ def _tiff_to_pil(path: str, stretch_lo: float = 0.1, stretch_hi: float = 99.9,
             val = struct.unpack_from(f'{endian}' + ('H' if typ == 3 else 'I') * count, raw, off)
         tags[tag] = val
 
-    width           = tags[256]
-    height          = tags[257]
+    width, height   = tags[256], tags[257]
     compression     = tags.get(259, 1)
     strip_offset    = tags[273]
     strip_bytecount = tags[279]
 
     payload = raw[strip_offset:strip_offset + strip_bytecount]
-    if compression in (8, 32946):   # DEFLATE / Adobe Deflate
+    if compression in (8, 32946):
         payload = zlib.decompress(payload)
     elif compression != 1:
         raise ValueError(f'Unsupported TIFF compression={compression} in {path}')
 
-    arr = np.frombuffer(payload, dtype=f'{endian}u2').reshape(height, width, 3).astype(np.float32)
+    return np.frombuffer(payload, dtype=f'{endian}u2').reshape(height, width, 3)
 
+
+def _tiff_to_pil(path: str, stretch_lo: float = 0.1, stretch_hi: float = 99.9,
+                 half_size: bool = False):
+    """Read our 16-bit RGB TIFF and return a PIL Image (8-bit, percentile-stretched)."""
+    from PIL import Image
+
+    arr = _read_tiff_array(path).astype(np.float32)
     if half_size:
         arr = arr[::2, ::2, :]
-
     out = np.empty(arr.shape, dtype=np.uint8)
     for c in range(3):
         out[:, :, c] = _stretch(arr[:, :, c], stretch_lo, stretch_hi)
-
     return Image.fromarray(out, mode='RGB')
 
 
@@ -383,6 +383,15 @@ def _extract_stars_from_raw(image_path: str, max_stars: int = 300,
         h, w = data.shape
         h2, w2 = h // DOWNSAMPLE, w // DOWNSAMPLE
         gray = data[:h2*DOWNSAMPLE, :w2*DOWNSAMPLE] \
+                   .reshape(h2, DOWNSAMPLE, w2, DOWNSAMPLE).mean(axis=(1, 3))
+        scale_x = scale_y = float(DOWNSAMPLE)
+    elif ext in ('.tif', '.tiff'):
+        arr16 = _read_tiff_array(image_path)
+        full_h, full_w = arr16.shape[:2]
+        # Green channel captures the most stellar detail in a debayered linear image.
+        gray_full = arr16[:, :, 1].astype(np.float32)
+        h2, w2 = full_h // DOWNSAMPLE, full_w // DOWNSAMPLE
+        gray = gray_full[:h2 * DOWNSAMPLE, :w2 * DOWNSAMPLE] \
                    .reshape(h2, DOWNSAMPLE, w2, DOWNSAMPLE).mean(axis=(1, 3))
         scale_x = scale_y = float(DOWNSAMPLE)
     else:
