@@ -788,13 +788,14 @@ impl IndiClient {
                 sleep(Duration::from_millis(1000)).await;
             }
 
-            let (ra, dec, state_str, is_busy) = {
+            let (ra, dec, state_str, is_busy, is_tracking) = {
                 let state_lock = self.state.read().await;
                 if let Some(props) = state_lock.devices.get(&self.device_name) {
                     let mut r = last_pos.0;
                     let mut d = last_pos.1;
                     let mut s = "UNKNOWN".to_string();
                     let mut busy = false;
+                    let mut tracking = false;
 
                     if let Some(coord) = props.get("EQUATORIAL_EOD_COORD") {
                         r = coord.elements.get("RA").and_then(|v| v.parse().ok()).unwrap_or(last_pos.0);
@@ -805,19 +806,25 @@ impl IndiClient {
                             busy = true;
                         } else if coord.state == "Ok" {
                             s = " TRACKING".to_string();
+                            tracking = true;
                         }
                     }
-                    (r, d, s, busy)
+                    (r, d, s, busy, tracking)
                 } else {
-                    (last_pos.0, last_pos.1, "UNKNOWN".to_string(), false)
+                    (last_pos.0, last_pos.1, "UNKNOWN".to_string(), false, false)
                 }
             };
 
             if is_busy {
                 seen_busy = true;
                 stable_ok_secs = 0;
-            } else {
+            } else if is_tracking {
+                // Only count stable-tracking seconds when the state is
+                // definitively Ok — not when it is UNKNOWN (INDI not responding).
                 stable_ok_secs += 1;
+            } else {
+                // UNKNOWN: don't advance the stable counter; INDI may just be
+                // slow to respond on the first poll.
             }
 
             let elapsed = start.elapsed().as_secs();
@@ -841,13 +848,12 @@ impl IndiClient {
                 break;
             }
 
-            // Fallback: mount was never seen as Busy and has been in Ok/Tracking
-            // state for ≥ 5 consecutive seconds.  This handles fast correction
-            // slews (< 1 s) that complete before the first poll, and also the
-            // case where the mount is already close enough that EQMod skips the
-            // Busy state entirely.  We do NOT compare coordinates here because
-            // target_ra/dec may be J2000 while EQUATORIAL_EOD_COORD is EOD —
-            // the epoch offset (~arcminutes) would cause spurious mismatches.
+            // Fallback: mount was never seen as Busy but has been in confirmed
+            // Ok/Tracking state for ≥ 5 consecutive seconds.  This handles fast
+            // correction slews (< 1 s) that complete before the first poll, and
+            // the case where EQMod skips the Busy state for tiny corrections.
+            // We require is_tracking (not just !is_busy) so that an UNKNOWN /
+            // disconnected INDI state never falsely triggers this.
             if !seen_busy && stable_ok_secs >= 5 {
                 println!("Mount already at target position (stable Tracking, no slew detected).");
                 break;
