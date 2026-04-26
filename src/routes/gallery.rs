@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::UNIX_EPOCH;
 
+use crate::state::AppState;
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 const CAPTURES_ROOT: &str = "imgs/astro_captures";
@@ -367,5 +369,139 @@ pub async fn gallery_download(query: web::Query<PathQuery>) -> impl Responder {
             .append_header(("Content-Disposition", format!("attachment; filename=\"{fname}\"")))
             .body(data),
         Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
+}
+
+// ── plate-solve ───────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct PlateSolvePayload {
+    pub path: String,
+}
+
+#[derive(Serialize)]
+pub struct PlateSolveResponse {
+    pub success:                bool,
+    pub ra_deg:                 Option<f64>,
+    pub dec_deg:                Option<f64>,
+    pub scale_arcsec_per_pixel: Option<f64>,
+    pub message:                String,
+}
+
+/// Parse RA / DEC / FOCAL / XPIXSZ out of the JSON produced by `cmd_tiffhdr`.
+fn parse_tiffhdr_meta(json_str: &str) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
+    let v: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
+    let ra  = v["RA"]    .as_str().and_then(|s| s.trim().parse().ok());
+    let dec = v["DEC"]   .as_str().and_then(|s| s.trim().parse().ok());
+    let px  = v["XPIXSZ"].as_str().and_then(|s| s.trim().parse().ok());
+    let fo  = v["FOCAL"] .as_str().and_then(|s| s.trim().parse().ok());
+    (ra, dec, px, fo)
+}
+
+/// POST /gallery/platesolve  body: {"path":"lights/M31_0001.tif"}
+///
+/// Plate-solves the image using the embedded FITS metadata as a hint.
+/// Returns the WCS centre in RA/Dec degrees and the pixel scale.
+/// The solve runs in a blocking thread — expect 30–120 s on a Raspberry Pi.
+#[post("/gallery/platesolve")]
+pub async fn gallery_platesolve(
+    body: web::Json<PlateSolvePayload>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let rel = body.path.trim_start_matches('/').replace("..", "");
+    let abs = PathBuf::from(CAPTURES_ROOT).join(&rel);
+
+    if !abs.exists() {
+        return HttpResponse::Ok().json(PlateSolveResponse {
+            success: false, ra_deg: None, dec_deg: None,
+            scale_arcsec_per_pixel: None, message: "File not found".into(),
+        });
+    }
+
+    // Camera settings — used as fallback when TIFF has no embedded metadata.
+    let (pixel_size_um, focal_mm) = {
+        let s = data.camera_settings.lock().await;
+        (s.pixel_size_micron, s.focal_length_mm)
+    };
+
+    // Mount coordinates — used as position hint when TIFF has no RA/Dec.
+    let (mount_ra_deg, mount_dec_deg) = {
+        let c = data.indi_client.read().await;
+        if let Some(client) = c.as_ref() {
+            let (ra_h, dec) = client.get_coordinates().await;
+            (ra_h * 15.0, dec)
+        } else {
+            (0.0, 0.0)
+        }
+    };
+
+    let abs_str     = abs.to_str().unwrap_or("").to_string();
+    let event_tx    = data.event_sender.clone();
+
+    let solve_out = tokio::task::spawn_blocking(move || {
+        // Read FITS metadata embedded in the TIFF's ImageDescription.
+        let (ra_hint, dec_hint, px_hint, fo_hint) =
+            match run_raw_tool(&["tiffhdr", &abs_str]) {
+                Ok(ref js) => parse_tiffhdr_meta(js),
+                Err(_)     => (None, None, None, None),
+            };
+
+        let ra_deg  = ra_hint .unwrap_or(mount_ra_deg);
+        let dec_deg = dec_hint.unwrap_or(mount_dec_deg);
+        let px      = px_hint .unwrap_or(pixel_size_um);
+        let fo      = fo_hint .unwrap_or(focal_mm).max(1.0);
+
+        let scale       = (206.265 * px) / fo;
+        let scale_lo    = format!("{:.4}", scale * 0.7);
+        let scale_hi    = format!("{:.4}", scale * 1.3);
+        let ra_s        = format!("{}", ra_deg);
+        let dec_s       = format!("{}", dec_deg);
+
+        let _ = event_tx.send(format!(
+            "Plate solving {} (hint RA={:.2}° Dec={:.2}°, ~{:.2}\"/px)...",
+            abs_str, ra_deg, dec_deg, scale,
+        ));
+
+        run_raw_tool(&["solve", &abs_str, &ra_s, &dec_s, &scale_lo, &scale_hi])
+    })
+    .await;
+
+    // Helper to build a failure response — always JSON so the frontend can res.json() safely.
+    let fail = |msg: String| {
+        let _ = data.event_sender.send(format!("Plate solve failed: {}", msg));
+        HttpResponse::Ok().json(PlateSolveResponse {
+            success: false, ra_deg: None, dec_deg: None,
+            scale_arcsec_per_pixel: None, message: msg,
+        })
+    };
+
+    match solve_out {
+        Ok(Ok(ref json_str)) if !json_str.trim().is_empty() => {
+            match serde_json::from_str::<serde_json::Value>(json_str) {
+                Ok(v) => {
+                    let success = v["success"].as_bool().unwrap_or(false);
+                    let ra_deg  = v["ra_deg"] .as_f64();
+                    let dec_deg = v["dec_deg"].as_f64();
+                    let scale   = v["scale_arcsec_per_pixel"].as_f64();
+                    let message = if success {
+                        let m = format!(
+                            "Solved: RA {:.4}°  Dec {:.4}°  {:.3}\"/px",
+                            ra_deg.unwrap_or(0.0), dec_deg.unwrap_or(0.0), scale.unwrap_or(0.0),
+                        );
+                        let _ = data.event_sender.send(m.clone());
+                        m
+                    } else {
+                        v["error"].as_str().unwrap_or("No solution found").to_string()
+                    };
+                    HttpResponse::Ok().json(PlateSolveResponse {
+                        success, ra_deg, dec_deg, scale_arcsec_per_pixel: scale, message,
+                    })
+                }
+                Err(e) => fail(format!("Bad solver output: {e} — raw: {}", json_str.chars().take(200).collect::<String>())),
+            }
+        }
+        Ok(Ok(_empty)) => fail("Solver produced no output (check Python / astrometry install)".into()),
+        Ok(Err(e))     => fail(e),
+        Err(e)         => fail(format!("Spawning task failed: {e}")),
     }
 }

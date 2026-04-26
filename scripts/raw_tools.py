@@ -647,6 +647,71 @@ def cmd_solve(image_path: str, ra_hint_deg: float, dec_hint_deg: float,
         print(json.dumps({"success": False, "error": "No solution found after all attempts"}))
 
 
+def cmd_tiffhdr(input_path: str):
+    """Print FITS-card metadata from a TIFF's ImageDescription tag as JSON."""
+    import struct
+
+    try:
+        with open(input_path, 'rb') as f:
+            raw = f.read()
+    except Exception as e:
+        print(json.dumps({'error': str(e)}))
+        return
+
+    bom = raw[0:2]
+    if bom not in (b'II', b'MM'):
+        print(json.dumps({}))
+        return
+    endian = '<' if bom == b'II' else '>'
+    if struct.unpack_from(f'{endian}H', raw, 2)[0] != 42:
+        print(json.dumps({}))
+        return
+
+    ifd_off = struct.unpack_from(f'{endian}I', raw, 4)[0]
+    n_entries = struct.unpack_from(f'{endian}H', raw, ifd_off)[0]
+
+    desc_str = ''
+    for i in range(n_entries):
+        base = ifd_off + 2 + 12 * i
+        tag, typ, count = struct.unpack_from(f'{endian}HHI', raw, base)
+        if tag != 270:   # ImageDescription
+            continue
+        # count * 1 byte (ASCII) – almost always > 4, so value field is an offset
+        if count <= 4:
+            val_bytes = raw[base + 8:base + 8 + count]
+        else:
+            off = struct.unpack_from(f'{endian}I', raw, base + 8)[0]
+            val_bytes = raw[off:off + count]
+        if val_bytes.endswith(b'\x00'):
+            val_bytes = val_bytes[:-1]
+        desc_str = val_bytes.decode('ascii', errors='replace')
+        break
+
+    if not desc_str:
+        print(json.dumps({}))
+        return
+
+    result = {}
+    for pos in range(0, len(desc_str), 80):
+        card = desc_str[pos:pos + 80]
+        if len(card) < 10:
+            break
+        key = card[:8].strip()
+        if not key or key in ('END', 'COMMENT', 'HISTORY', 'SIMPLE'):
+            continue
+        if card[8:10] == '= ':
+            raw_val = card[10:].strip()
+            if raw_val.startswith("'"):
+                end_q = raw_val.find("'", 1)
+                val = raw_val[1:end_q].strip() if end_q > 0 else raw_val[1:].strip()
+            else:
+                val = raw_val.split('/')[0].strip()
+            if val:
+                result[key] = val
+
+    print(json.dumps(result))
+
+
 if __name__ == '__main__':
     if len(sys.argv) < 2:
         print(__doc__)
@@ -680,6 +745,8 @@ if __name__ == '__main__':
         )
     elif cmd == 'fitshdr':
         cmd_fitshdr(sys.argv[2])
+    elif cmd == 'tiffhdr':
+        cmd_tiffhdr(sys.argv[2])
     elif cmd == 'solve':
         # solve <image> <ra_deg> <dec_deg> <scale_low> <scale_high> [radius_deg] [cache_dir]
         if len(sys.argv) < 7:
