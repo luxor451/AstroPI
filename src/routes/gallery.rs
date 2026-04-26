@@ -372,6 +372,33 @@ pub async fn gallery_download(query: web::Query<PathQuery>) -> impl Responder {
     }
 }
 
+// ── delete ───────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct DeletePayload {
+    pub path: String,
+}
+
+/// POST /gallery/delete  body: {"path":"lights/M31_0001.tif"}
+#[post("/gallery/delete")]
+pub async fn gallery_delete(body: web::Json<DeletePayload>) -> impl Responder {
+    let rel = body.path.trim_start_matches('/').replace("..", "");
+    let abs = PathBuf::from(CAPTURES_ROOT).join(&rel);
+
+    if !abs.exists() {
+        return HttpResponse::NotFound().body("File not found");
+    }
+
+    // Remove thumbnail cache entry so it doesn't show stale data.
+    let cache_name = rel.replace(['/', '\\'], "_") + ".jpg";
+    let _ = std::fs::remove_file(PathBuf::from(THUMB_CACHE).join(cache_name));
+
+    match std::fs::remove_file(&abs) {
+        Ok(_)  => HttpResponse::Ok().body("Deleted"),
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
+}
+
 // ── plate-solve ───────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
