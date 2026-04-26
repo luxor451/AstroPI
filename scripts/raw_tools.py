@@ -40,14 +40,130 @@ def _raw_to_pil(input_path: str, half_size: bool = False):
     return Image.fromarray(rgb)
 
 
+def _read_fits(path: str):
+    """Read a FITS file without astropy. Returns (data_array, header_dict).
+
+    Supports BITPIX 16 (int16) and -32 (float32).  Applies BZERO / BSCALE.
+    """
+    import struct
+    keywords: dict = {}
+    header_blocks = 0
+    found_end = False
+
+    with open(path, 'rb') as f:
+        while not found_end:
+            block = f.read(2880)
+            if len(block) < 2880:
+                header_blocks += 1
+                break
+            header_blocks += 1
+            for i in range(36):
+                card = block[i * 80:(i + 1) * 80].decode('ascii', errors='replace')
+                key = card[:8].strip()
+                if key == 'END':
+                    found_end = True
+                    break
+                if len(card) >= 10 and card[8:10] == '= ':
+                    raw_val = card[10:].strip()
+                    if raw_val.startswith("'"):
+                        end_q = raw_val.find("'", 1)
+                        val = raw_val[1:end_q].strip() if end_q > 0 else ''
+                    else:
+                        val_str = raw_val.split('/')[0].strip()
+                        try:
+                            val = int(val_str)
+                        except ValueError:
+                            try:
+                                val = float(val_str)
+                            except ValueError:
+                                val = val_str
+                    if key:
+                        keywords[key] = val
+
+        f.seek(header_blocks * 2880)
+        bitpix = int(keywords.get('BITPIX', 16))
+        w = int(keywords.get('NAXIS1', 0))
+        h = int(keywords.get('NAXIS2', 0))
+        n = w * h
+        if bitpix == 16:
+            data = np.frombuffer(f.read(n * 2), dtype='>i2').astype(np.float32)
+        elif bitpix == -32:
+            data = np.frombuffer(f.read(n * 4), dtype='>f4').astype(np.float32)
+        elif bitpix == 32:
+            data = np.frombuffer(f.read(n * 4), dtype='>i4').astype(np.float32)
+        else:
+            raise ValueError(f'Unsupported BITPIX={bitpix}')
+
+    bscale = float(keywords.get('BSCALE', 1.0))
+    bzero  = float(keywords.get('BZERO',  0.0))
+    if bscale != 1.0:
+        data *= bscale
+    if bzero != 0.0:
+        data += bzero
+    return data.reshape(h, w), keywords
+
+
+def _write_fits_16bit(path: str, arr: np.ndarray, keywords: list) -> None:
+    """Write a 16-bit FITS file using only struct + numpy (no astropy).
+
+    keywords: list of (key, value, comment) tuples appended after the mandatory
+    SIMPLE/BITPIX/NAXIS*/BZERO/BSCALE cards.  uint16 data is stored as int16
+    with BZERO=32768 per the FITS standard for unsigned-short images.
+    """
+    h, w = arr.shape[:2]
+
+    def _fmt(key, val, comment=''):
+        k = f'{key:<8}'
+        if isinstance(val, bool):
+            v = f"{'T' if val else 'F':>20}"
+        elif isinstance(val, int):
+            v = f'{val:>20d}'
+        elif isinstance(val, float):
+            v = f'{val:>20.10G}'
+        else:
+            v = f"'{str(val):<18}'"
+        s = f'{k}= {v}'
+        if comment:
+            s = f'{s} / {comment}'
+        return s[:80].ljust(80)
+
+    cards = [
+        _fmt('SIMPLE', True,    'file conforms to FITS standard'),
+        _fmt('BITPIX', 16,      'bits per data pixel'),
+        _fmt('NAXIS',  2,       'number of data axes'),
+        _fmt('NAXIS1', w,       'length of data axis 1 (columns)'),
+        _fmt('NAXIS2', h,       'length of data axis 2 (rows)'),
+        _fmt('BZERO',  32768.0, 'offset: physical = stored + BZERO'),
+        _fmt('BSCALE', 1.0,     'data scaling factor'),
+    ]
+    for key, val, comment in keywords:
+        cards.append(_fmt(key, val, comment))
+    cards.append(('END' + ' ' * 77)[:80])
+    while len(cards) % 36:
+        cards.append(' ' * 80)
+
+    stored = (arr.astype(np.int32) - 32768).astype('>i2').tobytes()
+    pad = (2880 - len(stored) % 2880) % 2880
+
+    with open(path, 'wb') as f:
+        f.write(''.join(cards).encode('ascii'))
+        f.write(stored)
+        if pad:
+            f.write(b'\x00' * pad)
+
+
 def _fits_to_pil(input_path: str, stretch_lo: float = 0.1, stretch_hi: float = 99.9):
-    """Open a FITS file and return a PIL Image (grayscale, stretched)."""
-    from astropy.io import fits
+    """Open a FITS file and return a PIL Image (stretched, color if BAYERPAT present)."""
     from PIL import Image
-    with fits.open(input_path) as hdul:
-        data = hdul[0].data.astype(np.float32)
-    if data.ndim == 3:
-        data = data[0]  # take first plane if cube
+    data, kw = _read_fits(input_path)
+    bayerpat = str(kw.get('BAYERPAT', '')).strip().upper()
+    if bayerpat in ('RGGB', 'BGGR', 'GRBG', 'GBRG'):
+        arr16 = np.clip(data, 0, 65535).astype(np.uint16)
+        rgb   = _debayer_2x2(arr16, bayerpat)
+        out   = np.empty(rgb.shape, dtype=np.uint8)
+        for c in range(3):
+            out[:, :, c] = _stretch(rgb[:, :, c].astype(np.float32), stretch_lo, stretch_hi)
+        return Image.fromarray(out, mode='RGB')
     stretched = _stretch(data, stretch_lo, stretch_hi)
     return Image.fromarray(stretched, mode='L')
 
@@ -250,38 +366,38 @@ def cmd_fits(input_path: str, output_path: str,
              ra_deg: float = None, dec_deg: float = None):
     """Convert a RAW file to FITS (raw Bayer CFA data) with optional mount position."""
     import rawpy
-    from astropy.io import fits
 
     with rawpy.imread(input_path) as raw:
-        bayer = raw.raw_image_visible.astype(np.uint16)
+        bayer      = raw.raw_image_visible.astype(np.uint16)
         color_desc = raw.color_desc.decode('ascii', errors='replace')
+        try:
+            bayer_pat = ''.join(color_desc[i] for i in raw.raw_pattern.flatten()[:4])
+        except Exception:
+            bayer_pat = color_desc[:4]
 
-    hdu = fits.PrimaryHDU(bayer)
-    h = hdu.header
-    h['INSTRUME'] = ('DSLR', 'Camera instrument')
-    h['BAYERPAT'] = (color_desc, 'Bayer color pattern')
-    h['NAXIS1']   = bayer.shape[1]
-    h['NAXIS2']   = bayer.shape[0]
-    h['XBINNING'] = (1, 'Binning X')
-    h['YBINNING'] = (1, 'Binning Y')
+    kw = [
+        ('INSTRUME', 'DSLR',    'Camera instrument'),
+        ('BAYERPAT', bayer_pat, 'Bayer color pattern'),
+        ('XBINNING', 1,         'Binning X'),
+        ('YBINNING', 1,         'Binning Y'),
+    ]
     if object_name:
-        h['OBJECT'] = (object_name, 'Target object name')
+        kw.append(('OBJECT', object_name, 'Target object name'))
     if ra_deg is not None:
-        # RA in degrees (FITS standard) and hours (OBJCTRA)
         ra_h = ra_deg / 15.0
         ra_hms = '{:02.0f}:{:02.0f}:{:05.2f}'.format(
             int(ra_h), int((ra_h % 1) * 60), ((ra_h * 60) % 1) * 60)
-        h['RA']      = (ra_deg, '[deg] Mount RA (J2000)')
-        h['OBJCTRA'] = (ra_hms, 'Mount RA in HH:MM:SS')
+        kw.append(('RA',      float(ra_deg), '[deg] Mount RA (J2000)'))
+        kw.append(('OBJCTRA', ra_hms,        'Mount RA in HH:MM:SS'))
     if dec_deg is not None:
         sign = '+' if dec_deg >= 0 else '-'
         adec = abs(dec_deg)
         dec_dms = '{}{:02.0f}:{:02.0f}:{:04.1f}'.format(
             sign, int(adec), int((adec % 1) * 60), ((adec * 60) % 1) * 60)
-        h['DEC']      = (dec_deg, '[deg] Mount Dec (J2000)')
-        h['OBJCTDEC'] = (dec_dms, 'Mount Dec in DD:MM:SS')
-    h['COMMENT'] = f'Converted from {Path(input_path).name} by AstroPI'
-    fits.HDUList([hdu]).writeto(output_path, overwrite=True)
+        kw.append(('DEC',      float(dec_deg), '[deg] Mount Dec (J2000)'))
+        kw.append(('OBJCTDEC', dec_dms,        'Mount Dec in DD:MM:SS'))
+
+    _write_fits_16bit(output_path, bayer, kw)
 
 
 def _write_tiff_16bit_gray(path: str, arr: np.ndarray, description: str = '') -> None:
@@ -355,8 +471,6 @@ def cmd_tiff(input_path: str, output_path: str,
     compression), file size ~48 MB for a 24 MP sensor.
     """
     import rawpy
-    from astropy.io import fits as astrofits
-
     with rawpy.imread(input_path) as raw:
         bayer      = raw.raw_image_visible.copy()          # (H, W) uint16
         color_desc = raw.color_desc.decode('ascii', errors='replace')
@@ -371,53 +485,48 @@ def cmd_tiff(input_path: str, output_path: str,
             black_level = None
         white_level = getattr(raw, 'white_level', None)
 
-    hdu = astrofits.PrimaryHDU(bayer.astype(np.uint16))
-    h   = hdu.header
-    h['BAYERPAT'] = (bayer_pat,    'Bayer color filter array pattern')
-    h['INSTRUME'] = ('DSLR',       'Camera type')
-    h['PROGRAM']  = ('AstroPI',    'Capture software')
+    kw = [
+        ('BAYERPAT', bayer_pat, 'Bayer color filter array pattern'),
+        ('INSTRUME', 'DSLR',    'Camera type'),
+        ('PROGRAM',  'AstroPI', 'Capture software'),
+    ]
     if black_level is not None:
-        h['PEDESTAL'] = (black_level,       'Black level pedestal (ADU)')
+        kw.append(('PEDESTAL', black_level,       'Black level pedestal (ADU)'))
     if white_level is not None:
-        h['MAXADU']   = (int(white_level),  'Saturation level (ADU)')
+        kw.append(('MAXADU',   int(white_level),  'Saturation level (ADU)'))
     if object_name:
-        h['OBJECT']   = (object_name,       'Target object name')
+        kw.append(('OBJECT',   object_name,           'Target object name'))
     if exptime_s is not None:
-        h['EXPTIME']  = (float(exptime_s),  '[s] Exposure duration')
+        kw.append(('EXPTIME',  float(exptime_s),      '[s] Exposure duration'))
     if iso is not None:
-        h['ISOSPEED'] = (int(iso),          'ISO speed')
-        h['GAIN']     = (int(iso),          'ISO/gain (Siril)')
+        kw.append(('ISOSPEED', int(iso),  'ISO speed'))
+        kw.append(('GAIN',     int(iso),  'ISO/gain (Siril)'))
     if focal_mm is not None:
-        h['FOCAL']    = (float(focal_mm),   '[mm] Telescope focal length')
+        kw.append(('FOCAL',    float(focal_mm),       '[mm] Telescope focal length'))
     if pixel_size_um is not None:
-        h['XPIXSZ']   = (float(pixel_size_um), '[um] Pixel size X')
-        h['YPIXSZ']   = (float(pixel_size_um), '[um] Pixel size Y')
+        kw.append(('XPIXSZ',   float(pixel_size_um),  '[um] Pixel size X'))
+        kw.append(('YPIXSZ',   float(pixel_size_um),  '[um] Pixel size Y'))
     if ra_deg is not None:
         ra_h = ra_deg / 15.0
         ra_hms = '{:02.0f}:{:02.0f}:{:05.2f}'.format(
             int(ra_h), int((ra_h % 1) * 60), ((ra_h * 60) % 1) * 60)
-        h['RA']       = (float(ra_deg), '[deg] Mount RA J2000')
-        h['OBJCTRA']  = (ra_hms,        'Mount RA HH:MM:SS.ss')
+        kw.append(('RA',      float(ra_deg), '[deg] Mount RA J2000'))
+        kw.append(('OBJCTRA', ra_hms,        'Mount RA HH:MM:SS.ss'))
     if dec_deg is not None:
         sign = '+' if dec_deg >= 0 else '-'
         adec = abs(dec_deg)
         dec_dms = '{}{:02.0f}:{:02.0f}:{:04.1f}'.format(
             sign, int(adec), int((adec % 1) * 60), ((adec * 60) % 1) * 60)
-        h['DEC']      = (float(dec_deg), '[deg] Mount Dec J2000')
-        h['OBJCTDEC'] = (dec_dms,        'Mount Dec DD:MM:SS.s')
+        kw.append(('DEC',      float(dec_deg), '[deg] Mount Dec J2000'))
+        kw.append(('OBJCTDEC', dec_dms,        'Mount Dec DD:MM:SS.s'))
 
-    astrofits.HDUList([hdu]).writeto(output_path, overwrite=True)
+    _write_fits_16bit(output_path, bayer, kw)
 
 
 def cmd_fitshdr(input_path: str):
     """Print FITS header as JSON to stdout."""
-    from astropy.io import fits
-    result = {}
-    with fits.open(input_path) as hdul:
-        for card in hdul[0].header.cards:
-            if card.keyword:
-                result[card.keyword] = str(card.value)
-    print(json.dumps(result))
+    _, kw = _read_fits(input_path)
+    print(json.dumps({k: str(v) for k, v in kw.items()}))
 
 
 def _extract_stars_from_raw(image_path: str, max_stars: int = 300,
@@ -453,11 +562,7 @@ def _extract_stars_from_raw(image_path: str, max_stars: int = 300,
     scale_y = float(DOWNSAMPLE)
 
     if ext in ('.fits', '.fit'):
-        from astropy.io import fits as astrofits
-        with astrofits.open(image_path) as hdul:
-            data = hdul[0].data.astype(np.float32)
-        if data.ndim == 3:
-            data = data[0]
+        data, _ = _read_fits(image_path)
         h, w = data.shape
         h2, w2 = h // DOWNSAMPLE, w // DOWNSAMPLE
         gray = data[:h2*DOWNSAMPLE, :w2*DOWNSAMPLE] \
