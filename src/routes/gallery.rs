@@ -130,7 +130,7 @@ fn build_folder(abs_path: &Path, base: &Path) -> GalleryFolder {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_lowercase();
-            if !is_image(&ext) {
+            if !is_image(&ext) || raw_ext(&ext) {
                 continue;
             }
             let meta = std::fs::metadata(&path).ok();

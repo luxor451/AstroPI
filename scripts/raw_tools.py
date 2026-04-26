@@ -129,32 +129,92 @@ def cmd_fits(input_path: str, output_path: str,
     fits.HDUList([hdu]).writeto(output_path, overwrite=True)
 
 
+def _write_tiff_16bit_rgb(path: str, rgb: np.ndarray, description: str = '') -> None:
+    """Write a 16-bit RGB TIFF using only numpy + struct (no external dependencies).
+
+    Produces a valid TIFF 6.0, uncompressed, little-endian, chunky RGB with
+    FITS-card metadata stored in the ImageDescription tag so Siril can read it.
+    """
+    import struct
+
+    h, w = rgb.shape[:2]
+    img_data   = rgb.astype('<u2').tobytes()          # LE uint16, RGBRGB…
+    bps_block  = struct.pack('<3H', 16, 16, 16)       # BitsPerSample R/G/B
+    desc_block = description.encode('ascii', errors='replace') + b'\x00'
+    res_block  = struct.pack('<2I', 72, 1)            # rational 72/1 dpi (X & Y)
+
+    # IFD entries – (tag, tiff_type, count, direct_value_or_None)
+    # Types: 2=ASCII  3=SHORT(u16)  4=LONG(u32)  5=RATIONAL(2×u32)
+    # None → value field will hold an offset to extra data below.
+    ifd_def = [
+        (256, 4, 1, w),                   # ImageWidth
+        (257, 4, 1, h),                   # ImageLength
+        (258, 3, 3, None),                # BitsPerSample  → bps_block
+        (259, 3, 1, 1),                   # Compression    = none
+        (262, 3, 1, 2),                   # PhotometricInterp = RGB
+        (270, 2, len(desc_block), None),  # ImageDescription → desc_block
+        (273, 4, 1, None),                # StripOffsets   → img_data
+        (277, 3, 1, 3),                   # SamplesPerPixel = 3
+        (278, 4, 1, h),                   # RowsPerStrip   = whole image
+        (279, 4, 1, len(img_data)),       # StripByteCounts
+        (282, 5, 1, None),                # XResolution    → res_block
+        (283, 5, 1, None),                # YResolution    → res_block
+        (284, 3, 1, 1),                   # PlanarConfiguration = chunky
+        (296, 3, 1, 2),                   # ResolutionUnit = inch
+    ]
+    n = len(ifd_def)
+
+    # Byte layout:
+    #   0  – 7    : TIFF header (8 bytes)
+    #   8  – 9    : IFD entry count (2 bytes)
+    #  10  – 10+12n-1 : IFD entries
+    #  10+12n – +3: next-IFD offset = 0
+    # extra_base = 8 + 2 + 12*n + 4
+    extra_base = 14 + 12 * n
+    bps_off  = extra_base
+    desc_off = bps_off  + len(bps_block)
+    xres_off = desc_off + len(desc_block)
+    yres_off = xres_off + len(res_block)
+    img_off  = yres_off + len(res_block)
+
+    offsets = {258: bps_off, 270: desc_off, 273: img_off, 282: xres_off, 283: yres_off}
+
+    buf = bytearray()
+    buf += struct.pack('<2sHI', b'II', 42, 8)   # header
+    buf += struct.pack('<H', n)                  # entry count
+    for tag, typ, count, val in ifd_def:
+        buf += struct.pack('<HHII', tag, typ, count, offsets[tag] if val is None else val)
+    buf += struct.pack('<I', 0)   # next IFD = none
+    buf += bps_block
+    buf += desc_block
+    buf += res_block              # XResolution
+    buf += res_block              # YResolution
+    buf += img_data
+
+    with open(path, 'wb') as f:
+        f.write(buf)
+
+
 def cmd_tiff(input_path: str, output_path: str,
              object_name: str = '',
              ra_deg: float = None, dec_deg: float = None,
              focal_mm: float = None, pixel_size_um: float = None,
              exptime_s: float = None, iso: int = None):
-    """Convert a RAW to a 16-bit linear debayered TIFF with Siril-compatible FITS metadata."""
+    """Convert a RAW to a 16-bit linear debayered TIFF with Siril-compatible FITS metadata.
+
+    No external packages beyond rawpy and numpy are required.
+    """
     import rawpy
-    try:
-        import tifffile
-    except ImportError:
-        print(
-            "tifffile not installed – run: pip3 install tifffile",
-            file=sys.stderr,
-        )
-        raise
 
     with rawpy.imread(input_path) as raw:
         rgb = raw.postprocess(
             use_camera_wb=True,
             output_bps=16,
             no_auto_bright=True,
-            gamma=(1, 1),          # linear – no tone curve
+            gamma=(1, 1),     # linear – no tone curve, preserves full dynamic range
         )  # (H, W, 3) uint16
 
-    # Build standard FITS header cards embedded in TIFF ImageDescription.
-    # Siril reads this tag and extracts focal length, pixel size, and coordinates.
+    # Build FITS-card header string for Siril's ImageDescription reader.
     def _card(key, value, comment=''):
         if isinstance(value, bool):
             v = f"{'T' if value else 'F':>20}"
@@ -176,22 +236,22 @@ def cmd_tiff(input_path: str, output_path: str,
         _card('PROGRAM', 'AstroPI',    'Capture software'),
     ]
     if object_name:
-        cards.append(_card('OBJECT', object_name, 'Target object name'))
+        cards.append(_card('OBJECT',   object_name,       'Target object name'))
     if exptime_s is not None:
-        cards.append(_card('EXPTIME', float(exptime_s), '[s] Exposure duration'))
+        cards.append(_card('EXPTIME',  float(exptime_s),  '[s] Exposure duration'))
     if iso is not None:
-        cards.append(_card('ISOSPEED', int(iso), 'ISO/gain setting'))
+        cards.append(_card('ISOSPEED', int(iso),          'ISO/gain setting'))
     if focal_mm is not None:
-        cards.append(_card('FOCAL', float(focal_mm), '[mm] Telescope focal length'))
+        cards.append(_card('FOCAL',    float(focal_mm),   '[mm] Telescope focal length'))
     if pixel_size_um is not None:
-        cards.append(_card('XPIXSZ', float(pixel_size_um), '[um] Pixel size X'))
-        cards.append(_card('YPIXSZ', float(pixel_size_um), '[um] Pixel size Y'))
+        cards.append(_card('XPIXSZ',   float(pixel_size_um), '[um] Pixel size X'))
+        cards.append(_card('YPIXSZ',   float(pixel_size_um), '[um] Pixel size Y'))
     if ra_deg is not None:
         ra_h = ra_deg / 15.0
         ra_hms = '{:02.0f}:{:02.0f}:{:05.2f}'.format(
             int(ra_h), int((ra_h % 1) * 60), ((ra_h * 60) % 1) * 60)
-        cards.append(_card('RA',      float(ra_deg), '[deg] Mount RA J2000'))
-        cards.append(_card('OBJCTRA', ra_hms,        'Mount RA  HH:MM:SS.ss'))
+        cards.append(_card('RA',       float(ra_deg), '[deg] Mount RA J2000'))
+        cards.append(_card('OBJCTRA',  ra_hms,        'Mount RA  HH:MM:SS.ss'))
     if dec_deg is not None:
         sign = '+' if dec_deg >= 0 else '-'
         adec = abs(dec_deg)
@@ -201,8 +261,7 @@ def cmd_tiff(input_path: str, output_path: str,
         cards.append(_card('OBJCTDEC', dec_dms,        'Mount Dec DD:MM:SS.s'))
     cards.append(('END' + ' ' * 77)[:80])
 
-    header_str = ''.join(cards)
-    tifffile.imwrite(output_path, rgb, description=header_str, photometric='rgb')
+    _write_tiff_16bit_rgb(output_path, rgb, ''.join(cards))
 
 
 def cmd_fitshdr(input_path: str):
