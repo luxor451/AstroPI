@@ -52,6 +52,78 @@ def _fits_to_pil(input_path: str, stretch_lo: float = 0.1, stretch_hi: float = 9
     return Image.fromarray(stretched, mode='L')
 
 
+def _read_tiff_bayerpat(path: str, default: str = 'RGGB') -> str:
+    """Read BAYERPAT from a TIFF's ImageDescription FITS cards (header only, no pixel I/O)."""
+    import struct
+    try:
+        with open(path, 'rb') as f:
+            hdr = f.read(8)
+            endian = '<' if hdr[:2] == b'II' else '>'
+            if struct.unpack_from(f'{endian}H', hdr, 2)[0] != 42:
+                return default
+            ifd_off = struct.unpack_from(f'{endian}I', hdr, 4)[0]
+            f.seek(ifd_off)
+            n = struct.unpack_from(f'{endian}H', f.read(2))[0]
+            entries = f.read(12 * n)
+            desc_off = desc_len = None
+            for i in range(n):
+                tag, typ, count = struct.unpack_from(f'{endian}HHI', entries, 12 * i)
+                if tag == 270 and typ == 2:   # ImageDescription (ASCII)
+                    off = struct.unpack_from(f'{endian}I', entries, 12 * i + 8)[0]
+                    desc_off, desc_len = (off, count) if count > 4 else (None, None)
+                    break
+            if desc_off is None:
+                return default
+            f.seek(desc_off)
+            desc = f.read(desc_len).rstrip(b'\x00').decode('ascii', errors='replace')
+    except Exception:
+        return default
+
+    for pos in range(0, len(desc), 80):
+        card = desc[pos:pos + 80]
+        if len(card) < 10 or card[:8].strip() == 'END':
+            break
+        if card[:8].strip() == 'BAYERPAT' and card[8:10] == '= ':
+            raw_val = card[10:].strip()
+            if raw_val.startswith("'"):
+                end_q = raw_val.find("'", 1)
+                val = raw_val[1:end_q].strip() if end_q > 0 else raw_val[1:].strip()
+            else:
+                val = raw_val.split('/')[0].strip()
+            if val:
+                return val[:4].upper()
+    return default
+
+
+def _debayer_2x2(bayer: np.ndarray, pattern: str = 'RGGB') -> np.ndarray:
+    """Fast 2×2 block debayer — halves each dimension, no interpolation artifacts.
+
+    Each 2×2 CFA block is collapsed into one RGB pixel by averaging the two
+    green sub-pixels. Supports all four standard Bayer patterns.
+    Returns a (H//2, W//2, 3) uint16 array.
+    """
+    H, W = bayer.shape[0] // 2, bayer.shape[1] // 2
+    # Extract the four 2×2 sub-planes
+    s = [bayer[r::2, c::2][:H, :W].astype(np.float32)
+         for r, c in ((0, 0), (0, 1), (1, 0), (1, 1))]
+    p = pattern.upper()
+    r_acc = np.zeros((H, W), np.float32)
+    g_acc = np.zeros((H, W), np.float32)
+    b_acc = np.zeros((H, W), np.float32)
+    g_n   = 0
+    for sub, color in zip(s, p):
+        if color == 'R':
+            r_acc += sub
+        elif color == 'B':
+            b_acc += sub
+        else:   # G
+            g_acc += sub
+            g_n   += 1
+    if g_n > 1:
+        g_acc /= g_n
+    return np.stack([r_acc, g_acc, b_acc], axis=2).clip(0, 65535).astype(np.uint16)
+
+
 def _read_tiff_array(path: str) -> np.ndarray:
     """Return the pixel data of our 16-bit RGB TIFF as a (H, W, 3) uint16 array.
 
@@ -105,21 +177,24 @@ def _read_tiff_array(path: str) -> np.ndarray:
 
 def _tiff_to_pil(path: str, stretch_lo: float = 0.1, stretch_hi: float = 99.9,
                  half_size: bool = False):
-    """Read a 16-bit TIFF (single-channel Bayer or RGB) and return a stretched 8-bit PIL Image."""
+    """Read a 16-bit TIFF (Bayer single-channel or RGB) and return a stretched 8-bit color PIL Image."""
     from PIL import Image
 
-    arr = _read_tiff_array(path).astype(np.float32)
-    arr = arr[::2, ::2] if half_size else arr   # works for both 2-D and 3-D
+    arr = _read_tiff_array(path)
 
     if arr.ndim == 2:
-        # Single-channel Bayer — show as grayscale
-        return Image.fromarray(_stretch(arr, stretch_lo, stretch_hi), mode='L')
-    else:
-        # Legacy RGB (3-channel)
-        out = np.empty(arr.shape, dtype=np.uint8)
-        for c in range(arr.shape[2]):
-            out[:, :, c] = _stretch(arr[:, :, c], stretch_lo, stretch_hi)
-        return Image.fromarray(out, mode='RGB')
+        # Single-channel Bayer → debayer to (H//2, W//2, 3) uint16
+        pat = _read_tiff_bayerpat(path)
+        arr = _debayer_2x2(arr, pat)    # already halved, so skip extra half_size step
+
+    if half_size and arr.ndim == 3:
+        arr = arr[::2, ::2]
+
+    arr = arr.astype(np.float32)
+    out = np.empty(arr.shape, dtype=np.uint8)
+    for c in range(arr.shape[2]):
+        out[:, :, c] = _stretch(arr[:, :, c], stretch_lo, stretch_hi)
+    return Image.fromarray(out, mode='RGB')
 
 
 def cmd_thumbnail(input_path: str, output_path: str, max_size: int = 400):
