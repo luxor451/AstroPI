@@ -25,8 +25,8 @@ use routes::mount::{
 use routes::sequence::{handle_pause, handle_start_sequence, handle_stop};
 use routes::settings::{get_location, get_settings, update_location, update_settings};
 use routes::gallery::{
-    gallery_convert_fits, gallery_delete, gallery_download, gallery_files, gallery_fits_header,
-    gallery_platesolve, gallery_preview, gallery_thumbnail,
+    gallery_convert_fits, gallery_delete, gallery_delete_folder, gallery_download, gallery_files,
+    gallery_fits_header, gallery_platesolve, gallery_preview, gallery_thumbnail,
 };
 use routes::status::{handle_status, ping, receive_command, sse_events};
 use routes::system::{handle_reboot, handle_shutdown, update_time};
@@ -139,6 +139,7 @@ async fn main() -> std::io::Result<()> {
             .service(gallery_download)
             .service(gallery_platesolve)
             .service(gallery_delete)
+            .service(gallery_delete_folder)
             // Status & events
             .service(handle_status)
             .service(sse_events)

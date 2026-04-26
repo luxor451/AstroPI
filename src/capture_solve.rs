@@ -448,17 +448,17 @@ pub async fn run_sequence(
                                 }
                             }
 
-                            // Auto-convert RAW → 16-bit TIFF with mount metadata for Siril
-                            let tiff_path = new_path.with_extension("tif");
-                            if !tiff_path.exists() {
+                            // Auto-convert RAW → 16-bit Bayer FITS with mount metadata for Siril
+                            let fits_path = new_path.with_extension("fits");
+                            if !fits_path.exists() {
                                 let ra_str  = ra_bg .map(|v| format!("{v:.6}")).unwrap_or_default();
                                 let dec_str = dec_bg.map(|v| format!("{v:.6}")).unwrap_or_default();
                                 let out = std::process::Command::new("python3")
                                     .arg("scripts/raw_tools.py")
                                     .args([
-                                        "tiff",
+                                        "tiff",   // command still named "tiff", now outputs FITS
                                         new_path.to_str().unwrap_or(""),
-                                        tiff_path.to_str().unwrap_or(""),
+                                        fits_path.to_str().unwrap_or(""),
                                         &target_bg,
                                         &ra_str,
                                         &dec_str,
@@ -470,14 +470,14 @@ pub async fn run_sequence(
                                     .output();
                                 match out {
                                     Ok(o) if o.status.success() => {
-                                        let stem = tiff_path
+                                        let stem = fits_path
                                             .file_name()
                                             .unwrap_or_default()
                                             .to_string_lossy();
-                                        let _ = sender_bg.send(format!("TIFF saved: {stem}"));
+                                        let _ = sender_bg.send(format!("FITS saved: {stem}"));
                                     }
                                     Ok(o) => eprintln!(
-                                        "TIFF conversion failed: {}",
+                                        "FITS conversion failed: {}",
                                         String::from_utf8_lossy(&o.stderr)
                                     ),
                                     Err(e) => eprintln!("raw_tools.py spawn error: {e}"),

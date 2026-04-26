@@ -320,15 +320,23 @@ pub async fn gallery_convert_fits(body: web::Json<ConvertPayload>) -> impl Respo
     }
 }
 
+/// Resolve a FITS path: look in CAPTURES_ROOT first (sequence output), then FITS_DIR (legacy).
+fn resolve_fits_path(rel: &str) -> Option<PathBuf> {
+    let p1 = PathBuf::from(CAPTURES_ROOT).join(rel);
+    if p1.exists() { return Some(p1); }
+    let p2 = PathBuf::from(FITS_DIR).join(rel);
+    if p2.exists() { return Some(p2); }
+    None
+}
+
 /// GET /gallery/fits_header?path=… — returns FITS header as JSON
 #[get("/gallery/fits_header")]
 pub async fn gallery_fits_header(query: web::Query<PathQuery>) -> impl Responder {
     let rel = query.path.trim_start_matches('/').replace("..", "");
-    let abs = PathBuf::from(FITS_DIR).join(&rel);
-
-    if !abs.exists() {
-        return HttpResponse::NotFound().body("FITS file not found");
-    }
+    let abs = match resolve_fits_path(&rel) {
+        Some(p) => p,
+        None    => return HttpResponse::NotFound().body("FITS file not found"),
+    };
 
     match run_raw_tool(&["fitshdr", abs.to_str().unwrap_or("")]) {
         Ok(json_str) => HttpResponse::Ok()
@@ -343,7 +351,10 @@ pub async fn gallery_fits_header(query: web::Query<PathQuery>) -> impl Responder
 pub async fn gallery_download(query: web::Query<PathQuery>) -> impl Responder {
     let rel = query.path.trim_start_matches('/').replace("..", "");
     let abs = if rel.ends_with(".fits") || rel.ends_with(".fit") {
-        PathBuf::from(FITS_DIR).join(&rel)
+        match resolve_fits_path(&rel) {
+            Some(p) => p,
+            None    => return HttpResponse::NotFound().body("File not found"),
+        }
     } else {
         PathBuf::from(CAPTURES_ROOT).join(&rel)
     };
@@ -377,6 +388,26 @@ pub async fn gallery_download(query: web::Query<PathQuery>) -> impl Responder {
 #[derive(Deserialize)]
 pub struct DeletePayload {
     pub path: String,
+}
+
+/// POST /gallery/delete_folder  body: {"path":"lights"}
+#[post("/gallery/delete_folder")]
+pub async fn gallery_delete_folder(body: web::Json<DeletePayload>) -> impl Responder {
+    let rel = body.path.trim_start_matches('/').replace("..", "");
+    if rel.is_empty() {
+        return HttpResponse::BadRequest().body("Cannot delete root captures directory");
+    }
+    let abs = PathBuf::from(CAPTURES_ROOT).join(&rel);
+    if !abs.exists() {
+        return HttpResponse::NotFound().body("Folder not found");
+    }
+    if !abs.is_dir() {
+        return HttpResponse::BadRequest().body("Path is not a folder");
+    }
+    match std::fs::remove_dir_all(&abs) {
+        Ok(_)  => HttpResponse::Ok().body("Deleted"),
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
 }
 
 /// POST /gallery/delete  body: {"path":"lights/M31_0001.tif"}
@@ -466,9 +497,14 @@ pub async fn gallery_platesolve(
     let event_tx    = data.event_sender.clone();
 
     let solve_out = tokio::task::spawn_blocking(move || {
-        // Read FITS metadata embedded in the TIFF's ImageDescription.
+        // For FITS files use fitshdr (astropy); for legacy TIFF use tiffhdr.
+        let hdr_cmd = if abs_str.ends_with(".fits") || abs_str.ends_with(".fit") {
+            "fitshdr"
+        } else {
+            "tiffhdr"
+        };
         let (ra_hint, dec_hint, px_hint, fo_hint) =
-            match run_raw_tool(&["tiffhdr", &abs_str]) {
+            match run_raw_tool(&[hdr_cmd, &abs_str]) {
                 Ok(ref js) => parse_tiffhdr_meta(js),
                 Err(_)     => (None, None, None, None),
             };

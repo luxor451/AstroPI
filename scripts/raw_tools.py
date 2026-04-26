@@ -91,7 +91,12 @@ def _read_tiff_bayerpat(path: str, default: str = 'RGGB') -> str:
             else:
                 val = raw_val.split('/')[0].strip()
             if val:
-                return val[:4].upper()
+                pat = val[:4].upper()
+                # 'RGBG' is rawpy's color_desc (lookup table), not a real Bayer
+                # pattern — remap it to the standard 4-letter tile string.
+                if pat not in ('RGGB', 'BGGR', 'GRBG', 'GBRG'):
+                    pat = default
+                return pat
     return default
 
 
@@ -341,66 +346,67 @@ def cmd_tiff(input_path: str, output_path: str,
              ra_deg: float = None, dec_deg: float = None,
              focal_mm: float = None, pixel_size_um: float = None,
              exptime_s: float = None, iso: int = None):
-    """Convert a RAW file to a 16-bit single-channel Bayer TIFF with Siril FITS metadata.
+    """Convert a RAW file to a 16-bit single-channel Bayer FITS file.
 
-    Saves the raw Bayer sensor data without debayering — the same approach used by
-    ZWO ASI Air.  The file is ~3× smaller than a debayered RGB TIFF and compresses
-    ~10× faster (DEFLATE level 1).  Siril reads BAYERPAT from the embedded FITS
-    header and debayers automatically during the stacking/processing step.
+    Saves raw Bayer sensor data (no debayering) — the same approach used by ZWO
+    ASI Air.  Siril reads BAYERPAT and debayers during its preprocessing step.
+    Using native FITS (via astropy) ensures every keyword is read correctly by
+    Siril without any ImageDescription parsing.  Write time is ~1 s (no
+    compression), file size ~48 MB for a 24 MP sensor.
     """
     import rawpy
+    from astropy.io import fits as astrofits
 
     with rawpy.imread(input_path) as raw:
-        bayer      = raw.raw_image_visible.copy()               # (H, W) uint16
-        bayer_pat  = raw.color_desc.decode('ascii', errors='replace')[:4]
+        bayer      = raw.raw_image_visible.copy()          # (H, W) uint16
+        color_desc = raw.color_desc.decode('ascii', errors='replace')
+        try:
+            bayer_pat = ''.join(color_desc[i] for i in raw.raw_pattern.flatten()[:4])
+        except Exception:
+            bayer_pat = 'RGGB'
+        try:
+            black_level = int(round(
+                sum(raw.black_level_per_channel) / len(raw.black_level_per_channel)))
+        except Exception:
+            black_level = None
+        white_level = getattr(raw, 'white_level', None)
 
-    def _card(key, value, comment=''):
-        if isinstance(value, bool):
-            v = f"{'T' if value else 'F':>20}"
-        elif isinstance(value, float):
-            v = f"{value:>20.6f}"
-        elif isinstance(value, int):
-            v = f"{value:>20d}"
-        else:
-            v = f"'{str(value):<18}'"
-        return (f"{key:<8}= {v} / {comment}")[:80].ljust(80)
-
-    cards = [
-        _card('SIMPLE',   True,           'FITS-compliant header'),
-        _card('BITPIX',   16,             'Bits per data value'),
-        _card('NAXIS',    2,              'Number of data axes (single-channel Bayer)'),
-        _card('NAXIS1',   bayer.shape[1], 'Image width in pixels'),
-        _card('NAXIS2',   bayer.shape[0], 'Image height in pixels'),
-        _card('BAYERPAT', bayer_pat,      'Bayer color filter array pattern'),
-        _card('PROGRAM',  'AstroPI',      'Capture software'),
-    ]
+    hdu = astrofits.PrimaryHDU(bayer.astype(np.uint16))
+    h   = hdu.header
+    h['BAYERPAT'] = (bayer_pat,    'Bayer color filter array pattern')
+    h['INSTRUME'] = ('DSLR',       'Camera type')
+    h['PROGRAM']  = ('AstroPI',    'Capture software')
+    if black_level is not None:
+        h['PEDESTAL'] = (black_level,       'Black level pedestal (ADU)')
+    if white_level is not None:
+        h['MAXADU']   = (int(white_level),  'Saturation level (ADU)')
     if object_name:
-        cards.append(_card('OBJECT',   object_name,           'Target object name'))
+        h['OBJECT']   = (object_name,       'Target object name')
     if exptime_s is not None:
-        cards.append(_card('EXPTIME',  float(exptime_s),      '[s] Exposure duration'))
+        h['EXPTIME']  = (float(exptime_s),  '[s] Exposure duration')
     if iso is not None:
-        cards.append(_card('ISOSPEED', int(iso),              'ISO/gain setting'))
+        h['ISOSPEED'] = (int(iso),          'ISO speed')
+        h['GAIN']     = (int(iso),          'ISO/gain (Siril)')
     if focal_mm is not None:
-        cards.append(_card('FOCAL',    float(focal_mm),       '[mm] Telescope focal length'))
+        h['FOCAL']    = (float(focal_mm),   '[mm] Telescope focal length')
     if pixel_size_um is not None:
-        cards.append(_card('XPIXSZ',   float(pixel_size_um),  '[um] Pixel size X'))
-        cards.append(_card('YPIXSZ',   float(pixel_size_um),  '[um] Pixel size Y'))
+        h['XPIXSZ']   = (float(pixel_size_um), '[um] Pixel size X')
+        h['YPIXSZ']   = (float(pixel_size_um), '[um] Pixel size Y')
     if ra_deg is not None:
-        ra_h   = ra_deg / 15.0
+        ra_h = ra_deg / 15.0
         ra_hms = '{:02.0f}:{:02.0f}:{:05.2f}'.format(
             int(ra_h), int((ra_h % 1) * 60), ((ra_h * 60) % 1) * 60)
-        cards.append(_card('RA',       float(ra_deg), '[deg] Mount RA J2000'))
-        cards.append(_card('OBJCTRA',  ra_hms,        'Mount RA  HH:MM:SS.ss'))
+        h['RA']       = (float(ra_deg), '[deg] Mount RA J2000')
+        h['OBJCTRA']  = (ra_hms,        'Mount RA HH:MM:SS.ss')
     if dec_deg is not None:
         sign = '+' if dec_deg >= 0 else '-'
         adec = abs(dec_deg)
         dec_dms = '{}{:02.0f}:{:02.0f}:{:04.1f}'.format(
             sign, int(adec), int((adec % 1) * 60), ((adec * 60) % 1) * 60)
-        cards.append(_card('DEC',      float(dec_deg), '[deg] Mount Dec J2000'))
-        cards.append(_card('OBJCTDEC', dec_dms,        'Mount Dec DD:MM:SS.s'))
-    cards.append(('END' + ' ' * 77)[:80])
+        h['DEC']      = (float(dec_deg), '[deg] Mount Dec J2000')
+        h['OBJCTDEC'] = (dec_dms,        'Mount Dec DD:MM:SS.s')
 
-    _write_tiff_16bit_gray(output_path, bayer, ''.join(cards))
+    astrofits.HDUList([hdu]).writeto(output_path, overwrite=True)
 
 
 def cmd_fitshdr(input_path: str):
