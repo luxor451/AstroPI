@@ -153,16 +153,22 @@ def _write_fits_16bit(path: str, arr: np.ndarray, keywords: list) -> None:
 
 
 def _fits_to_pil(input_path: str, stretch_lo: float = 0.1, stretch_hi: float = 99.9):
-    """Open a FITS file and return a PIL Image (stretched, color if BAYERPAT present)."""
+    """Open a FITS file and return a PIL Image (white-balanced, stretched, color)."""
     from PIL import Image
     data, kw = _read_fits(input_path)
     bayerpat = str(kw.get('BAYERPAT', '')).strip().upper()
     if bayerpat in ('RGGB', 'BGGR', 'GRBG', 'GBRG'):
         arr16 = np.clip(data, 0, 65535).astype(np.uint16)
-        rgb   = _debayer_2x2(arr16, bayerpat)
-        out   = np.empty(rgb.shape, dtype=np.uint8)
+        rgb   = _debayer_2x2(arr16, bayerpat).astype(np.float32)   # (H/2, W/2, 3)
+        # Apply camera white balance so colours match the in-camera JPEG.
+        wb_r  = float(kw.get('WB_RED',  2.0))
+        wb_b  = float(kw.get('WB_BLUE', 1.5))
+        rgb[:, :, 0] *= wb_r
+        rgb[:, :, 2] *= wb_b
+        rgb = np.clip(rgb, 0, 65535)
+        out = np.empty(rgb.shape, dtype=np.uint8)
         for c in range(3):
-            out[:, :, c] = _stretch(rgb[:, :, c].astype(np.float32), stretch_lo, stretch_hi)
+            out[:, :, c] = _stretch(rgb[:, :, c], stretch_lo, stretch_hi)
         return Image.fromarray(out, mode='RGB')
     stretched = _stretch(data, stretch_lo, stretch_hi)
     return Image.fromarray(stretched, mode='L')
@@ -304,14 +310,45 @@ def _tiff_to_pil(path: str, stretch_lo: float = 0.1, stretch_hi: float = 99.9,
     arr = _read_tiff_array(path)
 
     if arr.ndim == 2:
-        # Single-channel Bayer → debayer to (H//2, W//2, 3) uint16
         pat = _read_tiff_bayerpat(path)
-        arr = _debayer_2x2(arr, pat)    # already halved, so skip extra half_size step
+        arr = _debayer_2x2(arr, pat).astype(np.float32)
+        # Read WB from the FITS cards in ImageDescription
+        wb_r = wb_b = None
+        try:
+            import struct as _struct
+            with open(path, 'rb') as _f:
+                _raw = _f.read()
+            _bom = _raw[0:2]
+            _e = '<' if _bom == b'II' else '>'
+            _ifd = _struct.unpack_from(f'{_e}I', _raw, 4)[0]
+            _n   = _struct.unpack_from(f'{_e}H', _raw, _ifd)[0]
+            for _i in range(_n):
+                _b = _ifd + 2 + 12 * _i
+                _tag, _typ, _cnt = _struct.unpack_from(f'{_e}HHI', _raw, _b)
+                if _tag == 270 and _cnt > 4:
+                    _off = _struct.unpack_from(f'{_e}I', _raw, _b + 8)[0]
+                    _desc = _raw[_off:_off + _cnt].rstrip(b'\x00').decode('ascii', 'replace')
+                    for _pos in range(0, len(_desc), 80):
+                        _card = _desc[_pos:_pos + 80]
+                        _key  = _card[:8].strip()
+                        if _key in ('WB_RED', 'WB_BLUE') and _card[8:10] == '= ':
+                            _v = _card[10:].split('/')[0].strip()
+                            try:
+                                if _key == 'WB_RED':  wb_r = float(_v)
+                                else:                 wb_b = float(_v)
+                            except ValueError:
+                                pass
+        except Exception:
+            pass
+        if wb_r is not None: arr[:, :, 0] *= wb_r
+        if wb_b is not None: arr[:, :, 2] *= wb_b
+        arr = np.clip(arr, 0, 65535)
+    else:
+        arr = arr.astype(np.float32)
 
     if half_size and arr.ndim == 3:
         arr = arr[::2, ::2]
 
-    arr = arr.astype(np.float32)
     out = np.empty(arr.shape, dtype=np.uint8)
     for c in range(arr.shape[2]):
         out[:, :, c] = _stretch(arr[:, :, c], stretch_lo, stretch_hi)
@@ -484,11 +521,22 @@ def cmd_tiff(input_path: str, output_path: str,
         except Exception:
             black_level = None
         white_level = getattr(raw, 'white_level', None)
+        # Camera white-balance multipliers (R/G and B/G ratios, G normalised to 1).
+        # Stored so the preview can produce colours that match the in-camera JPEG.
+        try:
+            wb = raw.camera_whitebalance          # [R, G, B, G2]
+            g  = wb[1] if wb[1] > 0 else 1.0
+            wb_r = wb[0] / g
+            wb_b = wb[2] / g
+        except Exception:
+            wb_r, wb_b = 2.0, 1.5               # typical Canon fallback
 
     kw = [
-        ('BAYERPAT', bayer_pat, 'Bayer color filter array pattern'),
-        ('INSTRUME', 'DSLR',    'Camera type'),
-        ('PROGRAM',  'AstroPI', 'Capture software'),
+        ('BAYERPAT', bayer_pat,      'Bayer color filter array pattern'),
+        ('WB_RED',   float(wb_r),    'White balance R/G multiplier'),
+        ('WB_BLUE',  float(wb_b),    'White balance B/G multiplier'),
+        ('INSTRUME', 'DSLR',         'Camera type'),
+        ('PROGRAM',  'AstroPI',      'Capture software'),
     ]
     if black_level is not None:
         kw.append(('PEDESTAL', black_level,       'Black level pedestal (ADU)'))
