@@ -153,14 +153,13 @@ def _write_fits_16bit(path: str, arr: np.ndarray, keywords: list) -> None:
 
 
 def _fits_to_pil(input_path: str, stretch_lo: float = 0.1, stretch_hi: float = 99.9):
-    """Open a FITS file and return a PIL Image (white-balanced, stretched, color)."""
+    """Return a PIL Image for a FITS file (WB-corrected debayer + percentile stretch)."""
     from PIL import Image
     data, kw = _read_fits(input_path)
     bayerpat = str(kw.get('BAYERPAT', '')).strip().upper()
     if bayerpat in ('RGGB', 'BGGR', 'GRBG', 'GBRG'):
         arr16 = np.clip(data, 0, 65535).astype(np.uint16)
-        rgb   = _debayer_2x2(arr16, bayerpat).astype(np.float32)   # (H/2, W/2, 3)
-        # Apply camera white balance so colours match the in-camera JPEG.
+        rgb   = _debayer_2x2(arr16, bayerpat).astype(np.float32)
         wb_r  = float(kw.get('WB_RED',  2.0))
         wb_b  = float(kw.get('WB_BLUE', 1.5))
         rgb[:, :, 0] *= wb_r

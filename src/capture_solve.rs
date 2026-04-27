@@ -475,6 +475,10 @@ pub async fn run_sequence(
                                             .unwrap_or_default()
                                             .to_string_lossy();
                                         let _ = sender_bg.send(format!("FITS saved: {stem}"));
+                                        // Delete the RAW — only the FITS is kept.
+                                        if let Err(e) = std::fs::remove_file(&new_path) {
+                                            eprintln!("Failed to delete RAW {}: {e}", new_path.display());
+                                        }
                                     }
                                     Ok(o) => eprintln!(
                                         "FITS conversion failed: {}",
