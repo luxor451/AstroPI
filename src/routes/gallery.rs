@@ -420,9 +420,10 @@ pub async fn gallery_delete(body: web::Json<DeletePayload>) -> impl Responder {
         return HttpResponse::NotFound().body("File not found");
     }
 
-    // Remove thumbnail cache entry so it doesn't show stale data.
+    // Remove thumbnail cache entry and companion preview JPEG.
     let cache_name = rel.replace(['/', '\\'], "_") + ".jpg";
     let _ = std::fs::remove_file(PathBuf::from(THUMB_CACHE).join(cache_name));
+    let _ = std::fs::remove_file(abs.with_extension("jpg"));
 
     match std::fs::remove_file(&abs) {
         Ok(_)  => HttpResponse::Ok().body("Deleted"),

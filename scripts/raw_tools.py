@@ -363,7 +363,11 @@ def cmd_thumbnail(input_path: str, output_path: str, max_size: int = 400):
     ext = Path(input_path).suffix.lower()
 
     if ext in ('.fits', '.fit'):
-        img = _fits_to_pil(input_path)
+        companion = Path(input_path).with_suffix('.jpg')
+        if companion.exists():
+            img = Image.open(str(companion))
+        else:
+            img = _fits_to_pil(input_path)
     elif ext in ('.tif', '.tiff'):
         img = _tiff_to_pil(input_path, half_size=True)
     else:
@@ -388,7 +392,12 @@ def cmd_preview(input_path: str, output_path: str,
     ext = Path(input_path).suffix.lower()
 
     if ext in ('.fits', '.fit'):
-        img = _fits_to_pil(input_path, stretch_lo, stretch_hi)
+        companion = Path(input_path).with_suffix('.jpg')
+        if companion.exists():
+            from PIL import Image as _Im
+            img = _Im.open(str(companion))
+        else:
+            img = _fits_to_pil(input_path, stretch_lo, stretch_hi)
     elif ext in ('.tif', '.tiff'):
         img = _tiff_to_pil(input_path, stretch_lo, stretch_hi)
     else:
@@ -507,6 +516,7 @@ def cmd_tiff(input_path: str, output_path: str,
     compression), file size ~48 MB for a 24 MP sensor.
     """
     import rawpy
+    from PIL import Image as _Image
     with rawpy.imread(input_path) as raw:
         bayer      = raw.raw_image_visible.copy()          # (H, W) uint16
         color_desc = raw.color_desc.decode('ascii', errors='replace')
@@ -520,15 +530,23 @@ def cmd_tiff(input_path: str, output_path: str,
         except Exception:
             black_level = None
         white_level = getattr(raw, 'white_level', None)
-        # Camera white-balance multipliers (R/G and B/G ratios, G normalised to 1).
-        # Stored so the preview can produce colours that match the in-camera JPEG.
         try:
-            wb = raw.camera_whitebalance          # [R, G, B, G2]
+            wb = raw.camera_whitebalance
             g  = wb[1] if wb[1] > 0 else 1.0
             wb_r = wb[0] / g
             wb_b = wb[2] / g
         except Exception:
-            wb_r, wb_b = 2.0, 1.5               # typical Canon fallback
+            wb_r, wb_b = 2.0, 1.5
+        # Companion preview JPEG — full camera pipeline (WB + CCM + gamma + NR).
+        # Generated while rawpy holds the file open; saved alongside the FITS so
+        # gallery preview/thumbnail serve this instead of re-processing the FITS.
+        try:
+            rgb8 = raw.postprocess(use_camera_wb=True, half_size=True,
+                                    no_auto_bright=False, output_bps=8)
+            preview_jpg = str(Path(output_path).with_suffix('.jpg'))
+            _Image.fromarray(rgb8).save(preview_jpg, 'JPEG', quality=85)
+        except Exception:
+            pass
 
     kw = [
         ('BAYERPAT', bayer_pat,      'Bayer color filter array pattern'),
