@@ -10,6 +10,7 @@ use crate::state::AppState;
 
 const CAPTURES_ROOT: &str = "imgs/astro_captures";
 const THUMB_CACHE:   &str = "imgs/.thumbnails";
+const PREVIEW_DIR:   &str = "imgs/.previews";
 const FITS_DIR:      &str = "imgs/fits";
 const RAW_TOOLS:     &str = "scripts/raw_tools.py";
 
@@ -213,17 +214,16 @@ pub async fn gallery_thumbnail(query: web::Query<PathQuery>) -> impl Responder {
     let cache_name = rel.replace(['/', '\\'], "_") + ".jpg";
     let cache_path = PathBuf::from(THUMB_CACHE).join(&cache_name);
 
-    // For FITS files: if a fresher companion JPEG exists, invalidate the cache
-    // so the correct-colour thumbnail is regenerated.
+    // For FITS files: if a fresher companion JPEG exists in PREVIEW_DIR,
+    // invalidate the thumbnail cache so the correct-colour version is regenerated.
     if cache_path.exists() {
-        let companion = abs.with_extension("jpg");
-        if companion.exists() {
-            let cache_mt = cache_path.metadata().ok().and_then(|m| m.modified().ok());
-            let comp_mt  = companion .metadata().ok().and_then(|m| m.modified().ok());
-            if let (Some(cc), Some(cp)) = (cache_mt, comp_mt) {
-                if cp > cc {
-                    let _ = std::fs::remove_file(&cache_path);
-                }
+        let preview_jpg = PathBuf::from(PREVIEW_DIR)
+            .join(PathBuf::from(&rel).with_extension("jpg"));
+        if preview_jpg.exists() {
+            let cache_mt   = cache_path .metadata().ok().and_then(|m| m.modified().ok());
+            let preview_mt = preview_jpg.metadata().ok().and_then(|m| m.modified().ok());
+            if let (Some(cc), Some(pp)) = (cache_mt, preview_mt) {
+                if pp > cc { let _ = std::fs::remove_file(&cache_path); }
             }
         }
     }
@@ -435,10 +435,11 @@ pub async fn gallery_delete(body: web::Json<DeletePayload>) -> impl Responder {
         return HttpResponse::NotFound().body("File not found");
     }
 
-    // Remove thumbnail cache entry and companion preview JPEG.
+    // Remove thumbnail cache and companion preview JPEG from PREVIEW_DIR.
     let cache_name = rel.replace(['/', '\\'], "_") + ".jpg";
     let _ = std::fs::remove_file(PathBuf::from(THUMB_CACHE).join(cache_name));
-    let _ = std::fs::remove_file(abs.with_extension("jpg"));
+    let _ = std::fs::remove_file(
+        PathBuf::from(PREVIEW_DIR).join(PathBuf::from(&rel).with_extension("jpg")));
 
     match std::fs::remove_file(&abs) {
         Ok(_)  => HttpResponse::Ok().body("Deleted"),

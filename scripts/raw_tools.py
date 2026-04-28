@@ -152,15 +152,34 @@ def _write_fits_16bit(path: str, arr: np.ndarray, keywords: list) -> None:
             f.write(b'\x00' * pad)
 
 
-_RAW_EXTS = ('cr3', 'cr2', 'nef', 'arw', 'dng', 'raf', 'orf')
+_RAW_EXTS     = ('cr3', 'cr2', 'nef', 'arw', 'dng', 'raf', 'orf')
+_CAPTURES_ROOT = 'imgs/astro_captures'
+_PREVIEW_DIR   = 'imgs/.previews'
+
+
+def _preview_jpeg_path(fits_path: str) -> Path:
+    """Return the path of the companion JPEG for a FITS file.
+
+    Mirrors the FITS subfolder structure under imgs/.previews/ so the
+    captures directory stays clean.
+    e.g. imgs/astro_captures/M31/lights/frame_0001.fits
+      →  imgs/.previews/M31/lights/frame_0001.jpg
+    """
+    p = Path(fits_path)
+    try:
+        rel = p.relative_to(_CAPTURES_ROOT)
+    except ValueError:
+        rel = Path(p.name)
+    dest = Path(_PREVIEW_DIR) / rel.with_suffix('.jpg')
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return dest
 
 
 def _make_companion_jpeg(fits_path: str) -> bool:
-    """Generate a companion .jpg next to fits_path using rawpy, then delete the RAW.
+    """Generate a companion JPEG in imgs/.previews/ using rawpy, then delete the RAW.
 
-    Called lazily on first preview of any FITS file that has no .jpg yet but
-    still has a sibling RAW file (captures made before companion-JPEG generation
-    was added to cmd_tiff).  Returns True if the JPEG was created.
+    Called lazily the first time a FITS file without a companion is previewed.
+    Returns True if the JPEG was created successfully.
     """
     p = Path(fits_path)
     for ext in _RAW_EXTS:
@@ -173,9 +192,7 @@ def _make_companion_jpeg(fits_path: str) -> bool:
                 with rawpy.imread(str(raw)) as r:
                     rgb8 = r.postprocess(use_camera_wb=True, half_size=True,
                                          no_auto_bright=False, output_bps=8)
-                jpg = str(p.with_suffix('.jpg'))
-                _Im.fromarray(rgb8).save(jpg, 'JPEG', quality=85)
-                # CR3 is now redundant — remove it.
+                _Im.fromarray(rgb8).save(str(_preview_jpeg_path(fits_path)), 'JPEG', quality=85)
                 try:
                     raw.unlink()
                 except Exception:
@@ -190,13 +207,12 @@ def _fits_to_pil(input_path: str, stretch_lo: float = 0.1, stretch_hi: float = 9
     """Return a PIL Image for a FITS file.
 
     Priority:
-      1. Use the companion .jpg (rawpy-processed, exact camera colours).
-      2. If no companion exists but a sibling RAW does, generate the companion
-         (rawpy.postprocess), save it, delete the RAW, then use it.
+      1. Companion JPEG in imgs/.previews/ (rawpy-processed, exact camera colours).
+      2. If missing but a sibling RAW still exists, generate the companion then use it.
       3. Fall back to WB-corrected debayer + percentile stretch (slightly green).
     """
     from PIL import Image
-    companion = Path(input_path).with_suffix('.jpg')
+    companion = _preview_jpeg_path(input_path)
     if not companion.exists():
         _make_companion_jpeg(input_path)
     if companion.exists():
@@ -582,8 +598,8 @@ def cmd_tiff(input_path: str, output_path: str,
         try:
             rgb8 = raw.postprocess(use_camera_wb=True, half_size=True,
                                     no_auto_bright=False, output_bps=8)
-            preview_jpg = str(Path(output_path).with_suffix('.jpg'))
-            _Image.fromarray(rgb8).save(preview_jpg, 'JPEG', quality=85)
+            preview_jpg = _preview_jpeg_path(output_path)
+            _Image.fromarray(rgb8).save(str(preview_jpg), 'JPEG', quality=85)
         except Exception:
             pass
 
