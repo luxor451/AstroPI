@@ -152,9 +152,57 @@ def _write_fits_16bit(path: str, arr: np.ndarray, keywords: list) -> None:
             f.write(b'\x00' * pad)
 
 
+_RAW_EXTS = ('cr3', 'cr2', 'nef', 'arw', 'dng', 'raf', 'orf')
+
+
+def _make_companion_jpeg(fits_path: str) -> bool:
+    """Generate a companion .jpg next to fits_path using rawpy, then delete the RAW.
+
+    Called lazily on first preview of any FITS file that has no .jpg yet but
+    still has a sibling RAW file (captures made before companion-JPEG generation
+    was added to cmd_tiff).  Returns True if the JPEG was created.
+    """
+    p = Path(fits_path)
+    for ext in _RAW_EXTS:
+        for raw in (p.with_suffix('.' + ext), p.with_suffix('.' + ext.upper())):
+            if not raw.exists():
+                continue
+            try:
+                import rawpy
+                from PIL import Image as _Im
+                with rawpy.imread(str(raw)) as r:
+                    rgb8 = r.postprocess(use_camera_wb=True, half_size=True,
+                                         no_auto_bright=False, output_bps=8)
+                jpg = str(p.with_suffix('.jpg'))
+                _Im.fromarray(rgb8).save(jpg, 'JPEG', quality=85)
+                # CR3 is now redundant — remove it.
+                try:
+                    raw.unlink()
+                except Exception:
+                    pass
+                return True
+            except Exception:
+                pass
+    return False
+
+
 def _fits_to_pil(input_path: str, stretch_lo: float = 0.1, stretch_hi: float = 99.9):
-    """Return a PIL Image for a FITS file (WB-corrected debayer + percentile stretch)."""
+    """Return a PIL Image for a FITS file.
+
+    Priority:
+      1. Use the companion .jpg (rawpy-processed, exact camera colours).
+      2. If no companion exists but a sibling RAW does, generate the companion
+         (rawpy.postprocess), save it, delete the RAW, then use it.
+      3. Fall back to WB-corrected debayer + percentile stretch (slightly green).
+    """
     from PIL import Image
+    companion = Path(input_path).with_suffix('.jpg')
+    if not companion.exists():
+        _make_companion_jpeg(input_path)
+    if companion.exists():
+        return Image.open(str(companion))
+
+    # No rawpy source available — best-effort from FITS data.
     data, kw = _read_fits(input_path)
     bayerpat = str(kw.get('BAYERPAT', '')).strip().upper()
     if bayerpat in ('RGGB', 'BGGR', 'GRBG', 'GBRG'):
@@ -363,11 +411,7 @@ def cmd_thumbnail(input_path: str, output_path: str, max_size: int = 400):
     ext = Path(input_path).suffix.lower()
 
     if ext in ('.fits', '.fit'):
-        companion = Path(input_path).with_suffix('.jpg')
-        if companion.exists():
-            img = Image.open(str(companion))
-        else:
-            img = _fits_to_pil(input_path)
+        img = _fits_to_pil(input_path)   # handles companion / RAW fallback internally
     elif ext in ('.tif', '.tiff'):
         img = _tiff_to_pil(input_path, half_size=True)
     else:
@@ -392,12 +436,7 @@ def cmd_preview(input_path: str, output_path: str,
     ext = Path(input_path).suffix.lower()
 
     if ext in ('.fits', '.fit'):
-        companion = Path(input_path).with_suffix('.jpg')
-        if companion.exists():
-            from PIL import Image as _Im
-            img = _Im.open(str(companion))
-        else:
-            img = _fits_to_pil(input_path, stretch_lo, stretch_hi)
+        img = _fits_to_pil(input_path, stretch_lo, stretch_hi)  # handles companion / RAW fallback
     elif ext in ('.tif', '.tiff'):
         img = _tiff_to_pil(input_path, stretch_lo, stretch_hi)
     else:

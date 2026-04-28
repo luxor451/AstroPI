@@ -213,6 +213,21 @@ pub async fn gallery_thumbnail(query: web::Query<PathQuery>) -> impl Responder {
     let cache_name = rel.replace(['/', '\\'], "_") + ".jpg";
     let cache_path = PathBuf::from(THUMB_CACHE).join(&cache_name);
 
+    // For FITS files: if a fresher companion JPEG exists, invalidate the cache
+    // so the correct-colour thumbnail is regenerated.
+    if cache_path.exists() {
+        let companion = abs.with_extension("jpg");
+        if companion.exists() {
+            let cache_mt = cache_path.metadata().ok().and_then(|m| m.modified().ok());
+            let comp_mt  = companion .metadata().ok().and_then(|m| m.modified().ok());
+            if let (Some(cc), Some(cp)) = (cache_mt, comp_mt) {
+                if cp > cc {
+                    let _ = std::fs::remove_file(&cache_path);
+                }
+            }
+        }
+    }
+
     if !cache_path.exists() {
         if let Err(e) = ensure_dir(&cache_path) {
             return HttpResponse::InternalServerError().body(e.to_string());
