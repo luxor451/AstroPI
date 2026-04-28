@@ -427,7 +427,10 @@ def cmd_thumbnail(input_path: str, output_path: str, max_size: int = 400):
     ext = Path(input_path).suffix.lower()
 
     if ext in ('.fits', '.fit'):
-        img = _fits_to_pil(input_path)   # handles companion / RAW fallback internally
+        img = _fits_to_pil(input_path)
+    elif ext in ('.jpg', '.jpeg', '.png'):
+        from PIL import Image
+        img = Image.open(input_path)
     elif ext in ('.tif', '.tiff'):
         img = _tiff_to_pil(input_path, half_size=True)
     else:
@@ -452,7 +455,10 @@ def cmd_preview(input_path: str, output_path: str,
     ext = Path(input_path).suffix.lower()
 
     if ext in ('.fits', '.fit'):
-        img = _fits_to_pil(input_path, stretch_lo, stretch_hi)  # handles companion / RAW fallback
+        img = _fits_to_pil(input_path, stretch_lo, stretch_hi)
+    elif ext in ('.jpg', '.jpeg', '.png'):
+        from PIL import Image
+        img = Image.open(input_path)
     elif ext in ('.tif', '.tiff'):
         img = _tiff_to_pil(input_path, stretch_lo, stretch_hi)
     else:

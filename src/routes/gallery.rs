@@ -19,7 +19,7 @@ fn raw_ext(ext: &str) -> bool {
 }
 
 fn is_image(ext: &str) -> bool {
-    raw_ext(ext) || matches!(ext, "fits" | "fit" | "jpg" | "jpeg" | "png" | "tiff" | "tif")
+    raw_ext(ext) || matches!(ext, "fits" | "fit" | "tiff" | "tif")
 }
 
 /// Run `python3 scripts/raw_tools.py <args>` and return success/stderr.
