@@ -16,6 +16,7 @@ use astro_pi_plate_solving::{
 };
 
 use crate::astrometry_solver::solve_with_astrometry;
+use crate::goto_closed_loop::goto_closed_loop;
 use camera_control::CameraController;
 use eqmod_communication::IndiClient;
 use serde::Deserialize;
@@ -225,6 +226,10 @@ pub async fn run_sequence(
     flip_config: Option<&MeridianFlipConfig>,
     focal_mm: f64,
     pixel_size_um: f64,
+    recenter_every: u32,
+    recenter_target: Option<(f64, f64)>,  // (ra_hours, dec_deg)
+    recenter_cam_config: Option<&CameraConfig>,
+    recenter_platesolve_secs: f64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Initial message handled by caller to ensure immediate feedback
     // println!("Starting sequence (resuming from {})...", resume_from_idx);
@@ -235,6 +240,8 @@ pub async fn run_sequence(
         total_count += item.count;
     }
     let mut current_global_idx = 0;
+    // Counts completed light frames in this run (resets on new run, not on resume)
+    let mut light_counter: u32 = 0;
 
     // Handle for the previous frame's background rename/convert task so we
     // can await it before the sequence finishes (or on cancellation).
@@ -350,6 +357,63 @@ pub async fn run_sequence(
                                 sender.send("Sequence cancelled during meridian flip.".to_string());
                             return Ok(());
                         }
+                    }
+                }
+            }
+
+            // --- Auto-recenter (Light frames only) ---
+            if matches!(item.item_type, SequenceType::Light)
+                && recenter_every > 0
+                && light_counter > 0
+                && light_counter % recenter_every == 0
+            {
+                if let (Some(client), Some((rc_ra_h, rc_dec_deg)), Some(rc_cfg)) =
+                    (indi_client, recenter_target, recenter_cam_config)
+                {
+                    let msg = format!(
+                        "Auto-recenter: {} light frames captured, recentering...",
+                        light_counter
+                    );
+                    println!("{}", msg);
+                    let _ = sender.send(msg);
+
+                    let rc_settings = CaptureSettings {
+                        iso: settings.iso,
+                        aperture: None,
+                        exposure_seconds: recenter_platesolve_secs,
+                        save_directory: PathBuf::from("imgs/goto/captures"),
+                    };
+
+                    let rc_coord = CoordinateEquatorial::from_radians(
+                        rc_ra_h * std::f64::consts::PI / 12.0,
+                        rc_dec_deg * std::f64::consts::PI / 180.0,
+                    );
+
+                    match goto_closed_loop(
+                        client,
+                        Some(camera),
+                        rc_settings,
+                        rc_coord,
+                        true,
+                        sender,
+                        is_running,
+                        rc_cfg,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            let _ = sender.send("Auto-recenter complete.".to_string());
+                        }
+                        Err(e) => {
+                            let msg = format!("Auto-recenter failed: {}. Continuing sequence.", e);
+                            eprintln!("{}", msg);
+                            let _ = sender.send(msg);
+                        }
+                    }
+
+                    if !is_running.load(Ordering::Relaxed) {
+                        let _ = sender.send("Sequence cancelled during recenter.".to_string());
+                        return Ok(());
                     }
                 }
             }
@@ -494,6 +558,11 @@ pub async fn run_sequence(
                     println!("{}", msg_done);
                     let _ = sender_bg.send(msg_done);
                 }));
+            }
+
+            // Track completed light frames for auto-recenter
+            if matches!(item.item_type, SequenceType::Light) {
+                light_counter += 1;
             }
 
             // Check pause AFTER capture (so we can pause between frames)

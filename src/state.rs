@@ -51,6 +51,8 @@ pub struct SequenceOptions {
     pub meridian_flip: bool,
     pub post_meridian_limit_h: String,
     pub subfolder: String,
+    /// Recenter every N light frames using closed-loop GoTo. 0 = disabled.
+    pub recenter_every: u32,
 }
 
 impl Default for SequenceOptions {
@@ -61,6 +63,7 @@ impl Default for SequenceOptions {
             meridian_flip: false,
             post_meridian_limit_h: "0.1".to_string(),
             subfolder: String::new(),
+            recenter_every: 0,
         }
     }
 }

@@ -42,6 +42,8 @@ pub struct StartSequencePayload {
     pub shutdown_after: Option<bool>,
     /// Use closed-loop (plate-solve) GoTo.
     pub closed_loop: Option<bool>,
+    /// Auto-recenter every N light frames using closed-loop GoTo. 0 or None = disabled.
+    pub recenter_every: Option<u32>,
 }
 
 #[post("/start_sequence")]
@@ -322,6 +324,19 @@ pub async fn handle_start_sequence(
                 group.target
             ));
 
+            // Build recenter target from this group's RA/Dec (only when recenter is enabled)
+            let recenter_every = payload.recenter_every.unwrap_or(0);
+            let recenter_target: Option<(f64, f64)> = if recenter_every > 0 {
+                let ra_h   = group.ra.as_deref().and_then(|s| parse_hms(s));
+                let dec_deg = group.dec.as_deref().and_then(|s| parse_dms(s));
+                match (ra_h, dec_deg) {
+                    (Some(ra), Some(dec)) => Some((ra, dec)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
             let seq_result = run_sequence(
                 camera,
                 &capture_settings,
@@ -337,6 +352,10 @@ pub async fn handle_start_sequence(
                 flip_config.as_ref(),
                 cam_config.focal_length_mm,
                 cam_config.pixel_size_micron,
+                recenter_every,
+                recenter_target,
+                if recenter_every > 0 { Some(&cam_config) } else { None },
+                platesolving_exposure,
             )
             .await
             .map_err(|e| e.to_string());
