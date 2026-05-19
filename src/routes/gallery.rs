@@ -460,6 +460,7 @@ pub struct PlateSolveResponse {
     pub ra_deg:                 Option<f64>,
     pub dec_deg:                Option<f64>,
     pub scale_arcsec_per_pixel: Option<f64>,
+    pub rotation_deg:           Option<f64>,
     pub message:                String,
 }
 
@@ -489,7 +490,7 @@ pub async fn gallery_platesolve(
     if !abs.exists() {
         return HttpResponse::Ok().json(PlateSolveResponse {
             success: false, ra_deg: None, dec_deg: None,
-            scale_arcsec_per_pixel: None, message: "File not found".into(),
+            scale_arcsec_per_pixel: None, rotation_deg: None, message: "File not found".into(),
         });
     }
 
@@ -551,7 +552,7 @@ pub async fn gallery_platesolve(
         let _ = data.event_sender.send(format!("Plate solve failed: {}", msg));
         HttpResponse::Ok().json(PlateSolveResponse {
             success: false, ra_deg: None, dec_deg: None,
-            scale_arcsec_per_pixel: None, message: msg,
+            scale_arcsec_per_pixel: None, rotation_deg: None, message: msg,
         })
     };
 
@@ -559,14 +560,16 @@ pub async fn gallery_platesolve(
         Ok(Ok(ref json_str)) if !json_str.trim().is_empty() => {
             match serde_json::from_str::<serde_json::Value>(json_str) {
                 Ok(v) => {
-                    let success = v["success"].as_bool().unwrap_or(false);
-                    let ra_deg  = v["ra_deg"] .as_f64();
-                    let dec_deg = v["dec_deg"].as_f64();
-                    let scale   = v["scale_arcsec_per_pixel"].as_f64();
+                    let success  = v["success"].as_bool().unwrap_or(false);
+                    let ra_deg   = v["ra_deg"] .as_f64();
+                    let dec_deg  = v["dec_deg"].as_f64();
+                    let scale    = v["scale_arcsec_per_pixel"].as_f64();
+                    let rotation = v["rotation_deg"].as_f64();
                     let message = if success {
                         let m = format!(
-                            "Solved: RA {:.4}°  Dec {:.4}°  {:.3}\"/px",
-                            ra_deg.unwrap_or(0.0), dec_deg.unwrap_or(0.0), scale.unwrap_or(0.0),
+                            "Solved: RA {:.4}°  Dec {:.4}°  {:.3}\"/px  rot {:.1}°",
+                            ra_deg.unwrap_or(0.0), dec_deg.unwrap_or(0.0),
+                            scale.unwrap_or(0.0), rotation.unwrap_or(0.0),
                         );
                         let _ = data.event_sender.send(m.clone());
                         m
@@ -574,7 +577,8 @@ pub async fn gallery_platesolve(
                         v["error"].as_str().unwrap_or("No solution found").to_string()
                     };
                     HttpResponse::Ok().json(PlateSolveResponse {
-                        success, ra_deg, dec_deg, scale_arcsec_per_pixel: scale, message,
+                        success, ra_deg, dec_deg,
+                        scale_arcsec_per_pixel: scale, rotation_deg: rotation, message,
                     })
                 }
                 Err(e) => fail(format!("Bad solver output: {e} — raw: {}", json_str.chars().take(200).collect::<String>())),
@@ -583,5 +587,96 @@ pub async fn gallery_platesolve(
         Ok(Ok(_empty)) => fail("Solver produced no output (check Python / astrometry install)".into()),
         Ok(Err(e))     => fail(e),
         Err(e)         => fail(format!("Spawning task failed: {e}")),
+    }
+}
+
+/// POST /platesolve_snap
+///
+/// Plate-solves the most recent snap preview (`imgs/snap_latest.jpg`).
+/// Uses current mount coordinates as the position hint (no metadata in JPEG).
+#[post("/platesolve_snap")]
+pub async fn gallery_platesolve_snap(data: web::Data<AppState>) -> impl Responder {
+    let abs_str = "imgs/snap_latest.jpg".to_string();
+
+    if !std::path::Path::new(&abs_str).exists() {
+        return HttpResponse::Ok().json(PlateSolveResponse {
+            success: false, ra_deg: None, dec_deg: None,
+            scale_arcsec_per_pixel: None, rotation_deg: None,
+            message: "No snap available — take a preview first.".into(),
+        });
+    }
+
+    let (pixel_size_um, focal_mm) = {
+        let s = data.camera_settings.lock().await;
+        (s.pixel_size_micron, s.focal_length_mm)
+    };
+
+    let (mount_ra_deg, mount_dec_deg) = {
+        let c = data.indi_client.read().await;
+        if let Some(client) = c.as_ref() {
+            let (ra_h, dec) = client.get_coordinates().await;
+            (ra_h * 15.0, dec)
+        } else {
+            (0.0, 0.0)
+        }
+    };
+
+    let event_tx = data.event_sender.clone();
+
+    let solve_out = tokio::task::spawn_blocking(move || {
+        let scale    = (206.265 * pixel_size_um) / focal_mm.max(1.0);
+        let scale_lo = format!("{:.4}", scale * 0.7);
+        let scale_hi = format!("{:.4}", scale * 1.3);
+        let ra_s     = format!("{}", mount_ra_deg);
+        let dec_s    = format!("{}", mount_dec_deg);
+
+        let _ = event_tx.send(format!(
+            "Plate solving snap (hint RA={:.2}° Dec={:.2}°, ~{:.2}\"/px)...",
+            mount_ra_deg, mount_dec_deg, scale,
+        ));
+
+        run_raw_tool(&["solve", &abs_str, &ra_s, &dec_s, &scale_lo, &scale_hi])
+    })
+    .await;
+
+    let fail = |msg: String| {
+        let _ = data.event_sender.send(format!("Snap plate solve failed: {}", msg));
+        HttpResponse::Ok().json(PlateSolveResponse {
+            success: false, ra_deg: None, dec_deg: None,
+            scale_arcsec_per_pixel: None, rotation_deg: None, message: msg,
+        })
+    };
+
+    match solve_out {
+        Ok(Ok(ref json_str)) if !json_str.trim().is_empty() => {
+            match serde_json::from_str::<serde_json::Value>(json_str) {
+                Ok(v) => {
+                    let success  = v["success"].as_bool().unwrap_or(false);
+                    let ra_deg   = v["ra_deg"].as_f64();
+                    let dec_deg  = v["dec_deg"].as_f64();
+                    let scale    = v["scale_arcsec_per_pixel"].as_f64();
+                    let rotation = v["rotation_deg"].as_f64();
+                    let message = if success {
+                        let m = format!(
+                            "Solved: RA {:.4}°  Dec {:.4}°  {:.3}\"/px  rot {:.1}°",
+                            ra_deg.unwrap_or(0.0), dec_deg.unwrap_or(0.0),
+                            scale.unwrap_or(0.0), rotation.unwrap_or(0.0),
+                        );
+                        let _ = data.event_sender.send(m.clone());
+                        m
+                    } else {
+                        v["error"].as_str().unwrap_or("No solution found").to_string()
+                    };
+                    HttpResponse::Ok().json(PlateSolveResponse {
+                        success, ra_deg, dec_deg,
+                        scale_arcsec_per_pixel: scale, rotation_deg: rotation, message,
+                    })
+                }
+                Err(e) => fail(format!("Bad solver output: {e}")),
+            }
+        }
+        Ok(Ok(_)) => fail("Solver produced no output".into()),
+        Ok(Err(e)) => fail(e),
+        Err(e)     => fail(format!("Task error: {e}")),
     }
 }

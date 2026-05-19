@@ -93,6 +93,8 @@ pub async fn take_preview(
 
                 match std::fs::read(&jpg_path) {
                     Ok(bytes) => {
+                        // Keep a persistent copy for plate-solving
+                        let _ = std::fs::copy(&jpg_path, "imgs/snap_latest.jpg");
                         std::fs::remove_file(&jpg_path).ok();
                         HttpResponse::Ok().content_type("image/jpeg").body(bytes)
                     }
@@ -252,11 +254,16 @@ pub async fn handle_connect_camera(data: web::Data<AppState>) -> impl Responder 
 
     match CameraController::connect().await {
         Ok(c) => {
+            let model = c.model().await.replace(' ', "_");
+            {
+                let mut settings = data.camera_settings.lock().await;
+                settings.camera_model = model.clone();
+            }
             *camera_opt = Some(c);
-            println!("Camera connected successfully.");
+            println!("Camera connected successfully (model: {}).", model);
             let _ = data
                 .event_sender
-                .send("Camera connected successfully.".to_string());
+                .send(format!("Camera connected successfully (model: {}).", model));
             HttpResponse::Ok().body("Camera connected successfully")
         }
         Err(e) => {
@@ -268,6 +275,15 @@ pub async fn handle_connect_camera(data: web::Data<AppState>) -> impl Responder 
                 .body(format!("Failed to connect to camera: {}", e))
         }
     }
+}
+
+#[post("/disconnect_camera")]
+pub async fn handle_disconnect_camera(data: web::Data<AppState>) -> impl Responder {
+    let mut cam = data.camera.lock().await;
+    *cam = None;
+    let _ = data.event_sender.send("Camera disconnected.".to_string());
+    println!("Camera disconnected.");
+    HttpResponse::Ok().body("Camera disconnected")
 }
 
 #[get("/sequence_preview")]

@@ -64,7 +64,13 @@ pub async fn handle_start_sequence(
     let iso = settings_guard.iso;
     let platesolving_exposure = settings_guard.platesolving_exposure;
     let cam_config = settings_guard.to_camera_config();
+    let camera_model = settings_guard.camera_model.clone();
     drop(settings_guard);
+
+    let custom_suffix = {
+        let opts = data.sequence_options.lock().await;
+        opts.custom_suffix.clone()
+    };
 
     let capture_settings = CaptureSettings {
         iso,
@@ -356,6 +362,8 @@ pub async fn handle_start_sequence(
                 recenter_target,
                 if recenter_every > 0 { Some(&cam_config) } else { None },
                 platesolving_exposure,
+                &camera_model,
+                &custom_suffix,
             )
             .await
             .map_err(|e| e.to_string());

@@ -230,6 +230,8 @@ pub async fn run_sequence(
     recenter_target: Option<(f64, f64)>,  // (ra_hours, dec_deg)
     recenter_cam_config: Option<&CameraConfig>,
     recenter_platesolve_secs: f64,
+    camera_model: &str,
+    custom_suffix: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Initial message handled by caller to ensure immediate feedback
     // println!("Starting sequence (resuming from {})...", resume_from_idx);
@@ -272,9 +274,9 @@ pub async fn run_sequence(
         };
 
         let current_save_dir = if let Some(ref sub) = subfolder {
-            settings.save_directory.join(sub).join(type_name)
+            settings.save_directory.join(sub).join(target).join(type_name)
         } else {
-            settings.save_directory.join(type_name)
+            settings.save_directory.join(target).join(type_name)
         };
 
         std::fs::create_dir_all(&current_save_dir)?;
@@ -477,19 +479,40 @@ pub async fn run_sequence(
                 let date_bg = date_str.to_string();
                 let idx = current_global_idx;
                 let total = total_count;
-                let ra_bg      = mount_ra_deg;
-                let dec_bg     = mount_dec_deg;
-                let focal_bg   = focal_mm;
-                let pixel_bg   = pixel_size_um;
-                let exp_bg     = exposure;
-                let iso_bg     = settings.iso;
+                let ra_bg           = mount_ra_deg;
+                let dec_bg          = mount_dec_deg;
+                let focal_bg        = focal_mm;
+                let pixel_bg        = pixel_size_um;
+                let exp_bg          = exposure;
+                let iso_bg          = settings.iso;
+                let camera_model_bg = camera_model.to_string();
+                let custom_suffix_bg = custom_suffix.to_string();
+                let item_type_bg    = match item.item_type {
+                    SequenceType::Light => "Light",
+                    SequenceType::Dark  => "Dark",
+                    SequenceType::Flat  => "Flat",
+                    SequenceType::Bias  => "Bias",
+                };
 
                 prev_post_task = Some(tokio::task::spawn_blocking(move || {
-                    // Rename file to include target and date
+                    // Rename file to include target, date, type, camera model and custom suffix
                     if let Some(ext) = path_bg.extension() {
                         let ext_str = ext.to_string_lossy();
-                        let new_filename =
-                            format!("{}_{}_{:04}.{}", target_bg, date_bg, idx, ext_str);
+                        let model_part = if camera_model_bg.is_empty() {
+                            String::new()
+                        } else {
+                            format!("_{}", camera_model_bg)
+                        };
+                        let suffix_part = if custom_suffix_bg.is_empty() {
+                            String::new()
+                        } else {
+                            format!("_{}", custom_suffix_bg)
+                        };
+                        let new_filename = format!(
+                            "{}_{}_{}{}{}_{:04}.{}",
+                            target_bg, date_bg, item_type_bg,
+                            model_part, suffix_part, idx, ext_str
+                        );
                         let new_path = save_dir_bg.join(&new_filename);
                         if let Err(e) = std::fs::rename(&path_bg, &new_path) {
                             eprintln!("Failed to rename file: {}", e);

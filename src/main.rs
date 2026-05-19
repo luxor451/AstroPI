@@ -15,8 +15,8 @@ use goto_closed_loop::init_eqmod_goto;
 use state::{AppState, BackendSequenceState, CameraGlobalSettings, Location, SequenceOptions};
 
 use routes::camera::{
-    get_sequence_preview, handle_connect_camera, handle_update_camera_settings, start_livefeed,
-    take_preview,
+    get_sequence_preview, handle_connect_camera, handle_disconnect_camera,
+    handle_update_camera_settings, start_livefeed, take_preview,
 };
 use routes::mount::{
     handle_abort, handle_disconnect, handle_goto, handle_manual_move, handle_meridian_flip,
@@ -26,7 +26,7 @@ use routes::sequence::{handle_pause, handle_start_sequence, handle_stop};
 use routes::settings::{get_location, get_settings, update_location, update_settings};
 use routes::gallery::{
     gallery_convert_fits, gallery_delete, gallery_delete_folder, gallery_download, gallery_files,
-    gallery_fits_header, gallery_platesolve, gallery_preview, gallery_thumbnail,
+    gallery_fits_header, gallery_platesolve, gallery_platesolve_snap, gallery_preview, gallery_thumbnail,
 };
 use routes::status::{handle_status, ping, receive_command, sse_events};
 use routes::system::{handle_reboot, handle_shutdown, update_time};
@@ -107,6 +107,7 @@ async fn main() -> std::io::Result<()> {
             .service(start_livefeed)
             .service(handle_update_camera_settings)
             .service(handle_connect_camera)
+            .service(handle_disconnect_camera)
             .service(get_sequence_preview)
             // Mount
             .service(handle_goto)
@@ -138,6 +139,7 @@ async fn main() -> std::io::Result<()> {
             .service(gallery_fits_header)
             .service(gallery_download)
             .service(gallery_platesolve)
+            .service(gallery_platesolve_snap)
             .service(gallery_delete)
             .service(gallery_delete_folder)
             // Status & events

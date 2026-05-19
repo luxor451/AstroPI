@@ -11,6 +11,7 @@ Usage:
 
 import sys
 import json
+import math
 import zlib
 import numpy as np
 from pathlib import Path
@@ -957,11 +958,17 @@ def cmd_solve(image_path: str, ra_hint_deg: float, dec_hint_deg: float,
 
     if solution is not None and solution.has_match():
         m = solution.best_match()
+        # Rotation from WCS CD matrix: PA of North from image up, CCW positive
+        wf = m.wcs_fields
+        cd21 = (wf.get('CD2_1') or (0.0, None))[0] or 0.0
+        cd22 = (wf.get('CD2_2') or (0.0, None))[0] or 0.0
+        rotation_deg = math.degrees(math.atan2(-cd21, cd22)) if (cd21 or cd22) else 0.0
         print(json.dumps({
             "success": True,
             "ra_deg": m.center_ra_deg,
             "dec_deg": m.center_dec_deg,
             "scale_arcsec_per_pixel": m.scale_arcsec_per_pixel,
+            "rotation_deg": rotation_deg,
             "logodds": m.logodds,
             "attempt": attempt_label,
         }))

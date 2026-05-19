@@ -20,6 +20,7 @@ pub struct CameraGlobalSettings {
     pub pixel_size_micron: f64,
     pub focal_length_mm: f64,
     pub bitdepth: u16,
+    pub camera_model: String,
 }
 
 impl Default for CameraGlobalSettings {
@@ -30,6 +31,7 @@ impl Default for CameraGlobalSettings {
             pixel_size_micron: 6.0,
             focal_length_mm: 714.0,
             bitdepth: 14,
+            camera_model: String::new(),
         }
     }
 }
@@ -53,6 +55,7 @@ pub struct SequenceOptions {
     pub subfolder: String,
     /// Recenter every N light frames using closed-loop GoTo. 0 = disabled.
     pub recenter_every: u32,
+    pub custom_suffix: String,
 }
 
 impl Default for SequenceOptions {
@@ -64,6 +67,7 @@ impl Default for SequenceOptions {
             post_meridian_limit_h: "0.1".to_string(),
             subfolder: String::new(),
             recenter_every: 0,
+            custom_suffix: String::new(),
         }
     }
 }
