@@ -103,6 +103,19 @@ pub async fn goto_closed_loop(
         let result_platesolve =
             capture_and_solve(camera, &target_pos, &setting, cam_config).await?;
 
+        // Skip correction entirely if plate solve returned no solution —
+        // never sync to (0, 0) which would corrupt the mount's alignment model.
+        if result_platesolve.solution.coeffs_x.is_none() {
+            let msg = format!(
+                "Iteration {}: plate solve failed — skipping correction, retrying capture.",
+                i
+            );
+            eprintln!("{}", msg);
+            let _ = sender.send(msg);
+            i += 1;
+            continue;
+        }
+
         let solved_coordinate = CoordinateEquatorial::from_radians(
             result_platesolve.solution.optical_axis_ra,
             result_platesolve.solution.optical_axis_dec,

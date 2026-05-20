@@ -867,18 +867,18 @@ def cmd_solve(image_path: str, ra_hint_deg: float, dec_hint_deg: float,
                           "error": f"Too few stars detected ({len(stars)}), need at least 5"}))
         sys.exit(0)
 
-    # ── Attempt parameters (escalating relaxation) ────────────────────────────
+    # Limit to brightest 100 stars — fewer stars = far fewer quadruplets to test,
+    # dramatically faster solves. Stars are already sorted brightest-first by
+    # _adaptive_extract_stars (flux descending).
+    stars = stars[:100]
+    print(f"  [TIMING] using {len(stars)} stars for solving", file=sys.stderr)
+
+    # ── Attempt parameters ────────────────────────────────────────────────────
     #
-    # positional_noise_pixels: our stars come from a 4× downsampled image
-    # scaled back up, so each coordinate has ~±2 full-res pixel uncertainty.
-    # The default of 1.0 is too strict — we'd reject good matches near the
-    # centroid error boundary.
-    #
-    # scale range: widen on each retry so a miscalibrated focal length
-    # doesn't block every attempt.
-    #
-    # radius: mount pointing can be off by more than the nominal value after
-    # a long slew or if no sync has been done.
+    # noise=3.0 for all attempts: our stars come from a downsampled image
+    # so centroids have ~±2-3 px uncertainty. noise=2.0 was too strict —
+    # it caused 400+ second solves by exhausting all quadruplets without
+    # finding a match, while noise=3.0 solves the same field in <5s.
     mid_scale   = (pixel_scale_low + pixel_scale_high) / 2.0
     half_range  = (pixel_scale_high - pixel_scale_low) / 2.0
 
@@ -888,7 +888,7 @@ def cmd_solve(image_path: str, ra_hint_deg: float, dec_hint_deg: float,
             size_hint=astrometry.SizeHint(pixel_scale_low, pixel_scale_high),
             position_hint=astrometry.PositionHint(ra_hint_deg, dec_hint_deg,
                                                    search_radius_deg),
-            noise=2.0,
+            noise=3.0,
         ),
         dict(
             label="wide (2× scale + 2× radius)",
