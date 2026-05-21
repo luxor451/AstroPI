@@ -5,29 +5,8 @@ use std::sync::atomic::Ordering;
 
 use camera_control::CameraController;
 
-use crate::astrometry_solver::find_raw_tools;
+use crate::astrometry_solver::raw_to_jpeg_fast;
 use crate::state::AppState;
-
-/// Convert a RAW file (CR3/DNG/NEF/…) to JPEG using rawpy's embedded-thumbnail
-/// fast path — skips dnglab entirely.  ~50–800 ms vs 10–30 s for dnglab.
-fn raw_to_jpeg_fast(raw_path: &Path, jpeg_path: &Path) -> Result<(), String> {
-    let script = find_raw_tools();
-    let out = std::process::Command::new("python3")
-        .args([
-            script.to_str().unwrap_or("scripts/raw_tools.py"),
-            "snap_jpeg",
-            raw_path .to_str().unwrap_or(""),
-            jpeg_path.to_str().unwrap_or(""),
-        ])
-        .output()
-        .map_err(|e| format!("Failed to spawn raw_tools.py snap_jpeg: {e}"))?;
-
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("snap_jpeg failed: {stderr}"));
-    }
-    Ok(())
-}
 
 const PREVIEW_MAX_PX: u32 = 1920;
 const PREVIEW_JPEG_QUALITY: u8 = 82;

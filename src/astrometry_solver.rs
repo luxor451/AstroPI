@@ -18,6 +18,26 @@ use astro_pi_plate_solving::{CameraConfig, CoordinateEquatorial, PlateSolvingRes
 ///  3. `<binary_dir>/../scripts/raw_tools.py` — dev: binary inside target/…/
 ///  4. `scripts/raw_tools.py` relative to CWD — fallback (matches the rest of
 ///     the codebase which also uses CWD-relative paths for imgs/, fits/, etc.)
+/// Convert a RAW file (CR3 / DNG / NEF …) to JPEG using rawpy's embedded-thumbnail
+/// fast path — bypasses dnglab entirely.  ~50–800 ms vs 10–30 s with dnglab.
+pub fn raw_to_jpeg_fast(raw_path: &std::path::Path, jpeg_path: &std::path::Path) -> Result<(), String> {
+    let script = find_raw_tools();
+    let out = std::process::Command::new("python3")
+        .args([
+            script.to_str().unwrap_or("scripts/raw_tools.py"),
+            "snap_jpeg",
+            raw_path .to_str().unwrap_or(""),
+            jpeg_path.to_str().unwrap_or(""),
+        ])
+        .output()
+        .map_err(|e| format!("Failed to spawn snap_jpeg: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("snap_jpeg failed: {stderr}"));
+    }
+    Ok(())
+}
+
 pub fn find_raw_tools() -> PathBuf {
     // 1. Explicit override via environment variable
     if let Ok(dir) = std::env::var("ASTROPI_SCRIPTS") {

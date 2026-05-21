@@ -479,28 +479,31 @@ def cmd_snap_jpeg(input_path: str, output_path: str):
     import rawpy, io
     from PIL import Image
 
+    import time as _time
+    t0 = _time.perf_counter()
+    print(f"[snap_jpeg] input={input_path}", file=sys.stderr)
+
     with rawpy.imread(input_path) as raw:
         try:
             thumb = raw.extract_thumb()
             if thumb.format == rawpy.ThumbFormat.JPEG:
-                # Camera's own JPEG — write the bytes directly, no re-encoding
                 with open(output_path, 'wb') as f:
                     f.write(thumb.data)
+                kb = len(thumb.data) // 1024
+                print(f"[snap_jpeg] embedded JPEG extracted  {kb} KB  {_time.perf_counter()-t0:.2f}s", file=sys.stderr)
                 return
             elif thumb.format == rawpy.ThumbFormat.BITMAP:
-                Image.fromarray(thumb.data).save(output_path, 'JPEG', quality=90)
+                img = Image.fromarray(thumb.data)
+                img.save(output_path, 'JPEG', quality=90)
+                print(f"[snap_jpeg] bitmap thumbnail converted  {_time.perf_counter()-t0:.2f}s", file=sys.stderr)
                 return
-        except Exception:
-            pass  # no thumbnail — fall through to rawpy decode
+        except Exception as ex:
+            print(f"[snap_jpeg] no embedded thumbnail ({ex}), falling back to rawpy decode", file=sys.stderr)
 
         # Fallback: half-size debayer (4× fewer pixels → much faster than full-res)
-        rgb = raw.postprocess(
-            use_camera_wb=True,
-            half_size=True,
-            no_auto_bright=False,
-            output_bps=8,
-        )
+        rgb = raw.postprocess(use_camera_wb=True, half_size=True, no_auto_bright=False, output_bps=8)
     Image.fromarray(rgb).save(output_path, 'JPEG', quality=90)
+    print(f"[snap_jpeg] rawpy half-size decode  {_time.perf_counter()-t0:.2f}s", file=sys.stderr)
 
 
 def cmd_fits(input_path: str, output_path: str,

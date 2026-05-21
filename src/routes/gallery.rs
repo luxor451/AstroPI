@@ -630,12 +630,19 @@ pub async fn gallery_platesolve_snap(data: web::Data<AppState>) -> impl Responde
         let ra_s     = format!("{}", mount_ra_deg);
         let dec_s    = format!("{}", mount_dec_deg);
 
+        println!(
+            "[platesolve_snap] file={abs_str}  hint RA={mount_ra_deg:.3}° Dec={mount_dec_deg:.3}°  \
+             scale=[{scale_lo},{scale_hi}]\"/px  pixel={pixel_size_um}µm  f={focal_mm}mm"
+        );
         let _ = event_tx.send(format!(
-            "Plate solving snap (hint RA={:.2}° Dec={:.2}°, ~{:.2}\"/px)...",
-            mount_ra_deg, mount_dec_deg, scale,
+            "Plate solving snap (hint RA={:.2}° Dec={:.2}°, scale {scale_lo}–{scale_hi}\"/px)...",
+            mount_ra_deg, mount_dec_deg,
         ));
 
-        run_raw_tool(&["solve", &abs_str, &ra_s, &dec_s, &scale_lo, &scale_hi])
+        let t = std::time::Instant::now();
+        let result = run_raw_tool(&["solve", &abs_str, &ra_s, &dec_s, &scale_lo, &scale_hi]);
+        println!("[platesolve_snap] solver returned in {:.1}s", t.elapsed().as_secs_f64());
+        result
     })
     .await;
 

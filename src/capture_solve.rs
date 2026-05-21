@@ -11,11 +11,11 @@ use tokio::sync::broadcast::Sender;
 // Removed chrono import plan as discussed, using string injection from payload
 
 use astro_pi_plate_solving::{
-    cr3_to_png, Arcdegrees, CameraConfig, CoordinateEquatorial,
+    Arcdegrees, CameraConfig, CoordinateEquatorial,
     PlateSolvingResult, RaHoursMinutesSeconds,
 };
 
-use crate::astrometry_solver::solve_with_astrometry;
+use crate::astrometry_solver::{raw_to_jpeg_fast, solve_with_astrometry};
 use crate::goto_closed_loop::goto_closed_loop;
 use camera_control::CameraController;
 use eqmod_communication::IndiClient;
@@ -541,17 +541,14 @@ pub async fn run_sequence(
                         } else {
                             println!("Saved to {}", new_path.display());
 
-                            // Convert captured image to JPEG for live preview
+                            // Convert captured image to JPEG for live preview (fast rawpy path)
                             let seq_preview_path = PathBuf::from("imgs/sequence_latest.jpg");
-                            match cr3_to_png(&new_path, &seq_preview_path) {
+                            match raw_to_jpeg_fast(&new_path, &seq_preview_path) {
                                 Ok(_) => {
                                     let _ = sender_bg.send("SEQ_IMAGE_READY".to_string());
                                 }
                                 Err(e) => {
-                                    eprintln!(
-                                        "Failed to convert sequence image for preview: {}",
-                                        e
-                                    );
+                                    eprintln!("Failed to convert sequence image for preview: {}", e);
                                 }
                             }
 
