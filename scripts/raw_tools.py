@@ -708,6 +708,14 @@ def _extract_stars_from_raw(image_path: str, max_stars: int = 300,
         gray = gray_full[:h2 * DOWNSAMPLE, :w2 * DOWNSAMPLE] \
                    .reshape(h2, DOWNSAMPLE, w2, DOWNSAMPLE).mean(axis=(1, 3))
         scale_x = scale_y = float(DOWNSAMPLE)
+    elif ext in ('.jpg', '.jpeg', '.png'):
+        # JPEG/PNG snaps — load directly with PIL (no rawpy needed)
+        img = Image.open(image_path).convert('L')
+        full_w, full_h = img.size
+        h2, w2 = full_h // DOWNSAMPLE, full_w // DOWNSAMPLE
+        small = img.resize((w2, h2), Image.BOX)
+        gray = np.array(small, dtype=np.float32)
+        scale_x = scale_y = float(DOWNSAMPLE)
     else:
         with rawpy.imread(image_path) as raw:
             full_h, full_w = raw.raw_image_visible.shape

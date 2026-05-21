@@ -1,12 +1,32 @@
 use actix_web::{get, post, web, HttpResponse, Responder};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use astro_pi_plate_solving::cr3_to_png;
 use camera_control::CameraController;
 
 use crate::state::AppState;
+
+const PREVIEW_MAX_PX: u32 = 1920;
+const PREVIEW_JPEG_QUALITY: u8 = 82;
+
+/// Resize a JPEG file in-place to fit within `max_side`×`max_side`, re-encoding at `quality`.
+/// Silently no-ops on any error — it is a best-effort preview optimisation.
+fn resize_jpeg_inplace(path: &Path, max_side: u32, quality: u8) {
+    let img = match image::open(path) {
+        Ok(i) => i,
+        Err(_) => return,
+    };
+    if img.width() <= max_side && img.height() <= max_side {
+        return;
+    }
+    let resized = img.resize(max_side, max_side, image::imageops::FilterType::Triangle);
+    if let Ok(mut file) = std::fs::File::create(path) {
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, quality);
+        let _ = resized.write_with_encoder(encoder);
+    }
+}
 
 #[derive(Deserialize)]
 pub struct TakepreviewPayload {
@@ -91,19 +111,13 @@ pub async fn take_preview(
                     .event_sender
                     .send(format!("Preview saved at: {}", jpg_path.display()));
 
-                match std::fs::read(&jpg_path) {
-                    Ok(bytes) => {
-                        // Keep a persistent copy for plate-solving
-                        let _ = std::fs::copy(&jpg_path, "imgs/snap_latest.jpg");
-                        std::fs::remove_file(&jpg_path).ok();
-                        HttpResponse::Ok().content_type("image/jpeg").body(bytes)
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to read preview file: {}", e);
-                        std::fs::remove_file(&jpg_path).ok();
-                        HttpResponse::InternalServerError().body("Failed to read preview file")
-                    }
-                }
+                // Resize to preview resolution before transfer (much smaller payload)
+                resize_jpeg_inplace(&jpg_path, PREVIEW_MAX_PX, PREVIEW_JPEG_QUALITY);
+                // Persist as snap_latest.jpg for plate-solving and serving
+                let _ = std::fs::copy(&jpg_path, "imgs/snap_latest.jpg");
+                std::fs::remove_file(&jpg_path).ok();
+                // Return a lightweight ready signal; the image is served at GET /snap_preview
+                HttpResponse::Ok().body("preview_ready")
             };
 
             std::fs::remove_file(path).ok();
@@ -173,6 +187,7 @@ pub async fn start_livefeed(
                 Ok(path) => {
                     let preview = PathBuf::from("imgs/sequence_latest.jpg");
                     if astro_pi_plate_solving::cr3_to_png(&path, &preview).is_ok() {
+                        resize_jpeg_inplace(&preview, PREVIEW_MAX_PX, PREVIEW_JPEG_QUALITY);
                         let _ = data_clone.event_sender.send("SEQ_IMAGE_READY".to_string());
                     }
                     std::fs::remove_file(&path).ok();
@@ -290,7 +305,22 @@ pub async fn handle_disconnect_camera(data: web::Data<AppState>) -> impl Respond
 pub async fn get_sequence_preview() -> impl Responder {
     let path = PathBuf::from("imgs/sequence_latest.jpg");
     match std::fs::read(&path) {
-        Ok(bytes) => HttpResponse::Ok().content_type("image/jpeg").body(bytes),
+        Ok(bytes) => HttpResponse::Ok()
+            .content_type("image/jpeg")
+            .insert_header(("Cache-Control", "no-store"))
+            .body(bytes),
         Err(_) => HttpResponse::NotFound().body("No sequence preview available"),
+    }
+}
+
+#[get("/snap_preview")]
+pub async fn get_snap_preview() -> impl Responder {
+    let path = PathBuf::from("imgs/snap_latest.jpg");
+    match std::fs::read(&path) {
+        Ok(bytes) => HttpResponse::Ok()
+            .content_type("image/jpeg")
+            .insert_header(("Cache-Control", "no-store"))
+            .body(bytes),
+        Err(_) => HttpResponse::NotFound().body("No snap preview available"),
     }
 }

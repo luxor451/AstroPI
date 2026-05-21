@@ -15,7 +15,7 @@ use goto_closed_loop::init_eqmod_goto;
 use state::{AppState, BackendSequenceState, CameraGlobalSettings, Location, SequenceOptions};
 
 use routes::camera::{
-    get_sequence_preview, handle_connect_camera, handle_disconnect_camera,
+    get_sequence_preview, get_snap_preview, handle_connect_camera, handle_disconnect_camera,
     handle_update_camera_settings, start_livefeed, take_preview,
 };
 use routes::mount::{
@@ -109,6 +109,7 @@ async fn main() -> std::io::Result<()> {
             .service(handle_connect_camera)
             .service(handle_disconnect_camera)
             .service(get_sequence_preview)
+            .service(get_snap_preview)
             // Mount
             .service(handle_goto)
             .service(handle_manual_move)

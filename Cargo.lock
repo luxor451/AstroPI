@@ -14,6 +14,7 @@ dependencies = [
  "env_logger",
  "eqmod_communication",
  "futures",
+ "image 0.25.9",
  "serde",
  "serde_json",
  "tokio",
