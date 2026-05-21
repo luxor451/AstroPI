@@ -468,6 +468,41 @@ def cmd_preview(input_path: str, output_path: str,
     img.save(output_path, 'JPEG', quality=90)
 
 
+def cmd_snap_jpeg(input_path: str, output_path: str):
+    """Convert a RAW file to JPEG for preview/plate-solve, without dnglab.
+
+    Fast path (Canon CR3 and most DSLRs): extract the camera-generated embedded
+    JPEG thumbnail directly — ~10-50 ms, zero debayering overhead.
+    Fallback: half-size rawpy postprocess — ~300-800 ms, still 10-40× faster
+    than the dnglab → rawloader path.
+    """
+    import rawpy, io
+    from PIL import Image
+
+    with rawpy.imread(input_path) as raw:
+        try:
+            thumb = raw.extract_thumb()
+            if thumb.format == rawpy.ThumbFormat.JPEG:
+                # Camera's own JPEG — write the bytes directly, no re-encoding
+                with open(output_path, 'wb') as f:
+                    f.write(thumb.data)
+                return
+            elif thumb.format == rawpy.ThumbFormat.BITMAP:
+                Image.fromarray(thumb.data).save(output_path, 'JPEG', quality=90)
+                return
+        except Exception:
+            pass  # no thumbnail — fall through to rawpy decode
+
+        # Fallback: half-size debayer (4× fewer pixels → much faster than full-res)
+        rgb = raw.postprocess(
+            use_camera_wb=True,
+            half_size=True,
+            no_auto_bright=False,
+            output_bps=8,
+        )
+    Image.fromarray(rgb).save(output_path, 'JPEG', quality=90)
+
+
 def cmd_fits(input_path: str, output_path: str,
              object_name: str = '',
              ra_deg: float = None, dec_deg: float = None):
@@ -1080,6 +1115,8 @@ if __name__ == '__main__':
             exptime_s     = _opt_float(9),
             iso           = _opt_int(10),
         )
+    elif cmd == 'snap_jpeg':
+        cmd_snap_jpeg(sys.argv[2], sys.argv[3])
     elif cmd == 'fitshdr':
         cmd_fitshdr(sys.argv[2])
     elif cmd == 'tiffhdr':

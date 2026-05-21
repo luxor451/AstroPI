@@ -3,10 +3,31 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use astro_pi_plate_solving::cr3_to_png;
 use camera_control::CameraController;
 
+use crate::astrometry_solver::find_raw_tools;
 use crate::state::AppState;
+
+/// Convert a RAW file (CR3/DNG/NEF/…) to JPEG using rawpy's embedded-thumbnail
+/// fast path — skips dnglab entirely.  ~50–800 ms vs 10–30 s for dnglab.
+fn raw_to_jpeg_fast(raw_path: &Path, jpeg_path: &Path) -> Result<(), String> {
+    let script = find_raw_tools();
+    let out = std::process::Command::new("python3")
+        .args([
+            script.to_str().unwrap_or("scripts/raw_tools.py"),
+            "snap_jpeg",
+            raw_path .to_str().unwrap_or(""),
+            jpeg_path.to_str().unwrap_or(""),
+        ])
+        .output()
+        .map_err(|e| format!("Failed to spawn raw_tools.py snap_jpeg: {e}"))?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("snap_jpeg failed: {stderr}"));
+    }
+    Ok(())
+}
 
 const PREVIEW_MAX_PX: u32 = 1920;
 const PREVIEW_JPEG_QUALITY: u8 = 82;
@@ -99,11 +120,11 @@ pub async fn take_preview(
     {
         Ok(path) => {
             let jpg_path = path.with_extension("jpg");
-            let result_response = if let Err(e) = cr3_to_png(&path, &jpg_path) {
-                eprintln!("Failed to convert preview to PNG: {}", e);
+            let result_response = if let Err(e) = raw_to_jpeg_fast(&path, &jpg_path) {
+                eprintln!("Failed to convert preview: {}", e);
                 let _ = data
                     .event_sender
-                    .send(format!("Failed to convert preview to PNG: {}", e));
+                    .send(format!("Failed to convert preview: {}", e));
                 HttpResponse::InternalServerError().body(format!("Conversion failed: {}", e))
             } else {
                 println!("Preview saved at: {}", jpg_path.display());
@@ -186,7 +207,7 @@ pub async fn start_livefeed(
             match result {
                 Ok(path) => {
                     let preview = PathBuf::from("imgs/sequence_latest.jpg");
-                    if astro_pi_plate_solving::cr3_to_png(&path, &preview).is_ok() {
+                    if raw_to_jpeg_fast(&path, &preview).is_ok() {
                         resize_jpeg_inplace(&preview, PREVIEW_MAX_PX, PREVIEW_JPEG_QUALITY);
                         let _ = data_clone.event_sender.send("SEQ_IMAGE_READY".to_string());
                     }

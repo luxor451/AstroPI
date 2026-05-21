@@ -18,7 +18,7 @@ use astro_pi_plate_solving::{CameraConfig, CoordinateEquatorial, PlateSolvingRes
 ///  3. `<binary_dir>/../scripts/raw_tools.py` — dev: binary inside target/…/
 ///  4. `scripts/raw_tools.py` relative to CWD — fallback (matches the rest of
 ///     the codebase which also uses CWD-relative paths for imgs/, fits/, etc.)
-fn find_raw_tools() -> PathBuf {
+pub fn find_raw_tools() -> PathBuf {
     // 1. Explicit override via environment variable
     if let Ok(dir) = std::env::var("ASTROPI_SCRIPTS") {
         let p = PathBuf::from(dir).join("raw_tools.py");

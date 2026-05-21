@@ -137,7 +137,27 @@ pub async fn capture_and_solve(
     );
 
     let solve_start = Instant::now();
-    let solution = solve_with_astrometry(&image_path, initial_guess, cam_config)?;
+    // Offload the blocking Python subprocess to a dedicated OS thread so the
+    // tokio runtime stays free to handle other requests while solving.
+    // CoordinateEquatorial is not Clone/Copy, so extract primitive values.
+    let solution = {
+        let img   = image_path.clone();
+        let ra_h  = initial_guess.ra.to_hours();
+        let dec_d = initial_guess.dec.to_degrees();
+        let cfg   = cam_config.clone();
+        match tokio::task::spawn_blocking(move || -> Result<PlateSolvingResult, Box<dyn std::error::Error + Send + Sync>> {
+            let guess = CoordinateEquatorial::from_radians(
+                ra_h  * std::f64::consts::PI / 12.0,
+                dec_d * std::f64::consts::PI / 180.0,
+            );
+            solve_with_astrometry(&img, &guess, &cfg)
+                .map_err(|e| format!("{e}").into())
+        }).await {
+            Ok(Ok(s))  => s,
+            Ok(Err(e)) => return Err(format!("{e}").into()),
+            Err(e)     => return Err(format!("plate-solve task panicked: {e}").into()),
+        }
+    };
     let solve_time = solve_start.elapsed();
 
     if solution.coeffs_x.is_some() {
