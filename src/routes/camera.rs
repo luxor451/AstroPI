@@ -115,7 +115,11 @@ pub async fn take_preview(
                 resize_jpeg_inplace(&jpg_path, PREVIEW_MAX_PX, PREVIEW_JPEG_QUALITY);
                 // Persist as snap_latest.jpg for plate-solving and serving
                 let _ = std::fs::copy(&jpg_path, "imgs/snap_latest.jpg");
+                // Copy the pixel-scale sidecar so platesolve_snap gets the correct arcsec/px
+                let sidecar_src = format!("{}.scale_factor", jpg_path.display());
+                let _ = std::fs::copy(&sidecar_src, "imgs/snap_latest.jpg.scale_factor");
                 std::fs::remove_file(&jpg_path).ok();
+                let _ = std::fs::remove_file(&sidecar_src);
                 // Return a lightweight ready signal; the image is served at GET /snap_preview
                 HttpResponse::Ok().body("preview_ready")
             };

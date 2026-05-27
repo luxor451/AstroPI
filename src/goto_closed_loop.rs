@@ -10,7 +10,7 @@ use tokio::sync::broadcast::Sender;
 
 const DEVICE_NAME: &str = "EQMod Mount";
 const PORT: u16 = 7624;
-const TARGET_TOLLERANCE_ARCSEC: f64 = 100.0; // Tolerance for considering the goto successful
+const TARGET_TOLERANCE_ARCSEC: f64 = 100.0; // Tolerance for considering the goto successful
 const MAX_ITERATIONS: usize = 5; // Max iterations for closed-loop correction
 
 pub async fn init_eqmod_goto(
@@ -76,7 +76,7 @@ pub async fn goto_closed_loop(
     let mut distance_arcsec = f64::INFINITY; // Start with an infinite error to ensure we enter the loop
     let mut i = 0;
 
-    while distance_arcsec > TARGET_TOLLERANCE_ARCSEC && i < MAX_ITERATIONS {
+    while distance_arcsec > TARGET_TOLERANCE_ARCSEC && i < MAX_ITERATIONS {
         if !is_running.load(std::sync::atomic::Ordering::Relaxed) {
             let _ = sender.send("Goto aborted by user.".to_string());
             return Ok(());
@@ -84,7 +84,7 @@ pub async fn goto_closed_loop(
 
         let msg = format!(
             "Correction iteration {}: Error {:.2} arcsec > tolerance {:.2}. Adjusting...",
-            i, distance_arcsec, TARGET_TOLLERANCE_ARCSEC
+            i, distance_arcsec, TARGET_TOLERANCE_ARCSEC
         );
         println!("{}", msg);
         let _ = sender.send(msg);
@@ -124,7 +124,11 @@ pub async fn goto_closed_loop(
         let solved_ra = solved_coordinate.ra.to_hours();
         let solved_dec = solved_coordinate.dec.to_degrees();
 
-        distance_arcsec = ((target_ra - solved_ra) * 15.0).hypot(target_dec - solved_dec) * 3600.0;
+        // Great-circle separation: apply cos(dec) to the RA component so that
+        // an RA difference in hours maps to the correct on-sky angle.
+        let dra_deg  = (target_ra - solved_ra) * 15.0 * target_dec.to_radians().cos();
+        let ddec_deg = target_dec - solved_dec;
+        distance_arcsec = dra_deg.hypot(ddec_deg) * 3600.0;
 
         if let Err(e) = client.sync(solved_ra, solved_dec).await {
             let msg = format!("Warning: sync failed: {}", e);
@@ -147,7 +151,7 @@ pub async fn goto_closed_loop(
         i += 1;
     }
 
-    let final_msg = if distance_arcsec <= TARGET_TOLLERANCE_ARCSEC {
+    let final_msg = if distance_arcsec <= TARGET_TOLERANCE_ARCSEC {
         "Target acquired within tolerance.".to_string()
     } else {
         "Max iterations reached, goto failed.".to_string()

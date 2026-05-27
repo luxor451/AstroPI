@@ -475,6 +475,11 @@ def cmd_snap_jpeg(input_path: str, output_path: str):
     JPEG thumbnail directly — ~10-50 ms, zero debayering overhead.
     Fallback: half-size rawpy postprocess — ~300-800 ms, still 10-40× faster
     than the dnglab → rawloader path.
+
+    Always writes a companion <output>.scale_factor file containing a single
+    float: the ratio (sensor_width / jpeg_width).  The plate-solve endpoint
+    multiplies the sensor pixel-scale by this factor so the solver receives the
+    correct arcsec/pixel value for the JPEG it is actually solving.
     """
     import rawpy, io
     from PIL import Image
@@ -483,27 +488,56 @@ def cmd_snap_jpeg(input_path: str, output_path: str):
     t0 = _time.perf_counter()
     print(f"[snap_jpeg] input={input_path}", file=sys.stderr)
 
+    scale_factor = 1.0  # updated below once we know the output dimensions
+
     with rawpy.imread(input_path) as raw:
+        full_h, full_w = raw.raw_image_visible.shape  # sensor pixel count
         try:
             thumb = raw.extract_thumb()
             if thumb.format == rawpy.ThumbFormat.JPEG:
                 with open(output_path, 'wb') as f:
                     f.write(thumb.data)
+                # Measure the embedded JPEG dimensions to compute scale factor
+                with Image.open(io.BytesIO(thumb.data)) as _t:
+                    thumb_w, thumb_h = _t.size
+                scale_factor = full_w / thumb_w
                 kb = len(thumb.data) // 1024
-                print(f"[snap_jpeg] embedded JPEG extracted  {kb} KB  {_time.perf_counter()-t0:.2f}s", file=sys.stderr)
+                print(f"[snap_jpeg] embedded JPEG {thumb_w}x{thumb_h} (sensor {full_w}x{full_h})  "
+                      f"scale_factor={scale_factor:.2f}  {kb} KB  {_time.perf_counter()-t0:.2f}s",
+                      file=sys.stderr)
+                _write_scale_factor(output_path, scale_factor)
                 return
             elif thumb.format == rawpy.ThumbFormat.BITMAP:
                 img = Image.fromarray(thumb.data)
+                thumb_w, thumb_h = img.size
+                scale_factor = full_w / thumb_w
                 img.save(output_path, 'JPEG', quality=90)
-                print(f"[snap_jpeg] bitmap thumbnail converted  {_time.perf_counter()-t0:.2f}s", file=sys.stderr)
+                print(f"[snap_jpeg] bitmap thumbnail {thumb_w}x{thumb_h}  scale_factor={scale_factor:.2f}  "
+                      f"{_time.perf_counter()-t0:.2f}s", file=sys.stderr)
+                _write_scale_factor(output_path, scale_factor)
                 return
         except Exception as ex:
             print(f"[snap_jpeg] no embedded thumbnail ({ex}), falling back to rawpy decode", file=sys.stderr)
 
-        # Fallback: half-size debayer (4× fewer pixels → much faster than full-res)
+        # Fallback: half-size debayer — measure actual output dimensions instead of assuming 2×
         rgb = raw.postprocess(use_camera_wb=True, half_size=True, no_auto_bright=False, output_bps=8)
+        h_out, w_out = rgb.shape[:2]
+        scale_factor = full_w / w_out if w_out > 0 else 2.0
+
     Image.fromarray(rgb).save(output_path, 'JPEG', quality=90)
-    print(f"[snap_jpeg] rawpy half-size decode  {_time.perf_counter()-t0:.2f}s", file=sys.stderr)
+    print(f"[snap_jpeg] rawpy half-size decode  scale_factor={scale_factor:.2f}  "
+          f"{_time.perf_counter()-t0:.2f}s", file=sys.stderr)
+    _write_scale_factor(output_path, scale_factor)
+
+
+def _write_scale_factor(jpeg_path: str, factor: float):
+    """Write the pixel-scale correction factor as a plain-text sidecar file."""
+    sidecar = jpeg_path + '.scale_factor'
+    try:
+        with open(sidecar, 'w') as f:
+            f.write(str(factor))
+    except Exception as ex:
+        print(f"[snap_jpeg] warning: could not write scale_factor sidecar: {ex}", file=sys.stderr)
 
 
 def cmd_fits(input_path: str, output_path: str,

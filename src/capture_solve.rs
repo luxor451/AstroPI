@@ -618,7 +618,9 @@ pub async fn run_sequence(
     // Wait for the last background rename/convert task to finish before
     // announcing completion.
     if let Some(task) = prev_post_task.take() {
-        let _ = task.await;
+        if let Err(e) = task.await {
+            eprintln!("Background FITS task panicked: {}", e);
+        }
     }
 
     let msg = format!("Sequence complete! Captured {} frames total.", total_count);

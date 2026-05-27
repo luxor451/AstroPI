@@ -624,7 +624,19 @@ pub async fn gallery_platesolve_snap(data: web::Data<AppState>) -> impl Responde
     let event_tx = data.event_sender.clone();
 
     let solve_out = tokio::task::spawn_blocking(move || {
-        let scale    = (206.265 * pixel_size_um) / focal_mm.max(1.0);
+        // Read the pixel-scale correction factor written by snap_jpeg.
+        // snap_latest.jpg contains a downsampled thumbnail; each of its pixels
+        // covers (scale_factor) sensor pixels, so the effective arcsec/px is
+        // sensor_scale × scale_factor.  Without this the solver gets the wrong
+        // scale range and all three attempts fail.
+        let sidecar_path = format!("{abs_str}.scale_factor");
+        let scale_factor: f64 = std::fs::read_to_string(&sidecar_path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(1.0);
+
+        let sensor_scale = (206.265 * pixel_size_um) / focal_mm.max(1.0);
+        let scale    = sensor_scale * scale_factor;
         let scale_lo = format!("{:.4}", scale * 0.7);
         let scale_hi = format!("{:.4}", scale * 1.3);
         let ra_s     = format!("{}", mount_ra_deg);
@@ -632,7 +644,8 @@ pub async fn gallery_platesolve_snap(data: web::Data<AppState>) -> impl Responde
 
         println!(
             "[platesolve_snap] file={abs_str}  hint RA={mount_ra_deg:.3}° Dec={mount_dec_deg:.3}°  \
-             scale=[{scale_lo},{scale_hi}]\"/px  pixel={pixel_size_um}µm  f={focal_mm}mm"
+             sensor_scale={sensor_scale:.3}\"/px  scale_factor={scale_factor:.2}  \
+             effective=[{scale_lo},{scale_hi}]\"/px"
         );
         let _ = event_tx.send(format!(
             "Plate solving snap (hint RA={:.2}° Dec={:.2}°, scale {scale_lo}–{scale_hi}\"/px)...",
