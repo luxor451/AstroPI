@@ -3,8 +3,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, RwLock};
 
-use astro_pi_plate_solving::CameraConfig;
 use crate::capture_solve::MeridianFlipConfig;
+use astro_pi_plate_solving::CameraConfig;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Location {

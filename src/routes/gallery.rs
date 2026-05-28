@@ -9,10 +9,10 @@ use crate::state::AppState;
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 const CAPTURES_ROOT: &str = "imgs/astro_captures";
-const THUMB_CACHE:   &str = "imgs/.thumbnails";
-const PREVIEW_DIR:   &str = "imgs/.previews";
-const FITS_DIR:      &str = "imgs/fits";
-const RAW_TOOLS:     &str = "scripts/raw_tools.py";
+const THUMB_CACHE: &str = "imgs/.thumbnails";
+const PREVIEW_DIR: &str = "imgs/.previews";
+const FITS_DIR: &str = "imgs/fits";
+const RAW_TOOLS: &str = "scripts/raw_tools.py";
 
 fn raw_ext(ext: &str) -> bool {
     matches!(ext, "cr3" | "cr2" | "nef" | "arw" | "dng" | "raf" | "orf")
@@ -50,20 +50,20 @@ fn ensure_dir(p: &Path) -> std::io::Result<()> {
 
 #[derive(Serialize)]
 pub struct GalleryFile {
-    pub name:        String,
+    pub name: String,
     /// Path relative to CAPTURES_ROOT (or FITS_DIR for .fits files).
-    pub rel_path:    String,
-    pub size_bytes:  u64,
+    pub rel_path: String,
+    pub size_bytes: u64,
     pub modified_ms: u64,
-    pub kind:        String,   // "raw" | "fits" | "jpeg"
+    pub kind: String, // "raw" | "fits" | "jpeg"
     pub fits_exists: bool,
 }
 
 #[derive(Serialize)]
 pub struct GalleryFolder {
-    pub name:    String,
+    pub name: String,
     pub rel_path: String,
-    pub files:   Vec<GalleryFile>,
+    pub files: Vec<GalleryFile>,
     pub folders: Vec<GalleryFolder>,
 }
 
@@ -74,11 +74,11 @@ pub struct PathQuery {
 
 #[derive(Deserialize)]
 pub struct PreviewQuery {
-    pub path:    String,
+    pub path: String,
     /// Low percentile for stretch (default 0.1)
-    pub lo:      Option<f64>,
+    pub lo: Option<f64>,
     /// High percentile for stretch (default 99.9)
-    pub hi:      Option<f64>,
+    pub hi: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -89,7 +89,7 @@ pub struct ConvertPayload {
 #[derive(Serialize)]
 pub struct ConvertResponse {
     pub fits_path: String,
-    pub message:   String,
+    pub message: String,
 }
 
 // ── file listing ─────────────────────────────────────────────────────────────
@@ -106,11 +106,16 @@ fn build_folder(abs_path: &Path, base: &Path) -> GalleryFolder {
         .to_string_lossy()
         .replace('\\', "/");
 
-    let mut files   = Vec::new();
+    let mut files = Vec::new();
     let mut folders = Vec::new();
 
     let Ok(entries) = std::fs::read_dir(abs_path) else {
-        return GalleryFolder { name, rel_path, files, folders };
+        return GalleryFolder {
+            name,
+            rel_path,
+            files,
+            folders,
+        };
     };
 
     let mut entries: Vec<_> = entries.flatten().collect();
@@ -156,7 +161,9 @@ fn build_folder(abs_path: &Path, base: &Path) -> GalleryFolder {
             // check if a .fits counterpart exists
             let fits_exists = if raw_ext(&ext) {
                 let fits_name = path.file_stem().unwrap_or_default().to_string_lossy();
-                PathBuf::from(FITS_DIR).join(format!("{fits_name}.fits")).exists()
+                PathBuf::from(FITS_DIR)
+                    .join(format!("{fits_name}.fits"))
+                    .exists()
             } else {
                 false
             };
@@ -178,7 +185,12 @@ fn build_folder(abs_path: &Path, base: &Path) -> GalleryFolder {
         }
     }
 
-    GalleryFolder { name, rel_path, files, folders }
+    GalleryFolder {
+        name,
+        rel_path,
+        files,
+        folders,
+    }
 }
 
 // ── routes ───────────────────────────────────────────────────────────────────
@@ -189,10 +201,10 @@ pub async fn gallery_files() -> impl Responder {
     let root = PathBuf::from(CAPTURES_ROOT);
     if !root.exists() {
         return HttpResponse::Ok().json(GalleryFolder {
-            name:     "astro_captures".into(),
+            name: "astro_captures".into(),
             rel_path: "".into(),
-            files:    vec![],
-            folders:  vec![],
+            files: vec![],
+            folders: vec![],
         });
     }
     let tree = build_folder(&root, &root);
@@ -217,13 +229,15 @@ pub async fn gallery_thumbnail(query: web::Query<PathQuery>) -> impl Responder {
     // For FITS files: if a fresher companion JPEG exists in PREVIEW_DIR,
     // invalidate the thumbnail cache so the correct-colour version is regenerated.
     if cache_path.exists() {
-        let preview_jpg = PathBuf::from(PREVIEW_DIR)
-            .join(PathBuf::from(&rel).with_extension("jpg"));
+        let preview_jpg =
+            PathBuf::from(PREVIEW_DIR).join(PathBuf::from(&rel).with_extension("jpg"));
         if preview_jpg.exists() {
-            let cache_mt   = cache_path .metadata().ok().and_then(|m| m.modified().ok());
+            let cache_mt = cache_path.metadata().ok().and_then(|m| m.modified().ok());
             let preview_mt = preview_jpg.metadata().ok().and_then(|m| m.modified().ok());
             if let (Some(cc), Some(pp)) = (cache_mt, preview_mt) {
-                if pp > cc { let _ = std::fs::remove_file(&cache_path); }
+                if pp > cc {
+                    let _ = std::fs::remove_file(&cache_path);
+                }
             }
         }
     }
@@ -242,9 +256,7 @@ pub async fn gallery_thumbnail(query: web::Query<PathQuery>) -> impl Responder {
     }
 
     match std::fs::read(&cache_path) {
-        Ok(data) => HttpResponse::Ok()
-            .content_type("image/jpeg")
-            .body(data),
+        Ok(data) => HttpResponse::Ok().content_type("image/jpeg").body(data),
         Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
     }
 }
@@ -260,7 +272,9 @@ pub async fn gallery_preview(query: web::Query<PreviewQuery>) -> impl Responder 
         abs
     } else {
         let alt = PathBuf::from(FITS_DIR).join(&rel);
-        if alt.exists() { alt } else {
+        if alt.exists() {
+            alt
+        } else {
             return HttpResponse::NotFound().body("File not found");
         }
     };
@@ -285,9 +299,7 @@ pub async fn gallery_preview(query: web::Query<PreviewQuery>) -> impl Responder 
     }
 
     match std::fs::read(&tmp) {
-        Ok(data) => HttpResponse::Ok()
-            .content_type("image/jpeg")
-            .body(data),
+        Ok(data) => HttpResponse::Ok().content_type("image/jpeg").body(data),
         Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
     }
 }
@@ -310,14 +322,13 @@ pub async fn gallery_convert_fits(body: web::Json<ConvertPayload>) -> impl Respo
     let fits_path = PathBuf::from(FITS_DIR).join(format!("{stem}.fits"));
 
     if let Err(e) = std::fs::create_dir_all(FITS_DIR) {
-        return HttpResponse::InternalServerError()
-            .body(format!("Cannot create fits dir: {e}"));
+        return HttpResponse::InternalServerError().body(format!("Cannot create fits dir: {e}"));
     }
 
     if fits_path.exists() {
         return HttpResponse::Ok().json(ConvertResponse {
             fits_path: format!("{stem}.fits"),
-            message:   "Already converted".into(),
+            message: "Already converted".into(),
         });
     }
 
@@ -328,19 +339,22 @@ pub async fn gallery_convert_fits(body: web::Json<ConvertPayload>) -> impl Respo
     ]) {
         Ok(_) => HttpResponse::Ok().json(ConvertResponse {
             fits_path: format!("{stem}.fits"),
-            message:   "Converted successfully".into(),
+            message: "Converted successfully".into(),
         }),
-        Err(e) => HttpResponse::InternalServerError()
-            .body(format!("Conversion failed: {e}")),
+        Err(e) => HttpResponse::InternalServerError().body(format!("Conversion failed: {e}")),
     }
 }
 
 /// Resolve a FITS path: look in CAPTURES_ROOT first (sequence output), then FITS_DIR (legacy).
 fn resolve_fits_path(rel: &str) -> Option<PathBuf> {
     let p1 = PathBuf::from(CAPTURES_ROOT).join(rel);
-    if p1.exists() { return Some(p1); }
+    if p1.exists() {
+        return Some(p1);
+    }
     let p2 = PathBuf::from(FITS_DIR).join(rel);
-    if p2.exists() { return Some(p2); }
+    if p2.exists() {
+        return Some(p2);
+    }
     None
 }
 
@@ -350,7 +364,7 @@ pub async fn gallery_fits_header(query: web::Query<PathQuery>) -> impl Responder
     let rel = query.path.trim_start_matches('/').replace("..", "");
     let abs = match resolve_fits_path(&rel) {
         Some(p) => p,
-        None    => return HttpResponse::NotFound().body("FITS file not found"),
+        None => return HttpResponse::NotFound().body("FITS file not found"),
     };
 
     match run_raw_tool(&["fitshdr", abs.to_str().unwrap_or("")]) {
@@ -368,7 +382,7 @@ pub async fn gallery_download(query: web::Query<PathQuery>) -> impl Responder {
     let abs = if rel.ends_with(".fits") || rel.ends_with(".fit") {
         match resolve_fits_path(&rel) {
             Some(p) => p,
-            None    => return HttpResponse::NotFound().body("File not found"),
+            None => return HttpResponse::NotFound().body("File not found"),
         }
     } else {
         PathBuf::from(CAPTURES_ROOT).join(&rel)
@@ -392,7 +406,10 @@ pub async fn gallery_download(query: web::Query<PathQuery>) -> impl Responder {
     match std::fs::read(&abs) {
         Ok(data) => HttpResponse::Ok()
             .content_type(content_type)
-            .append_header(("Content-Disposition", format!("attachment; filename=\"{fname}\"")))
+            .append_header((
+                "Content-Disposition",
+                format!("attachment; filename=\"{fname}\""),
+            ))
             .body(data),
         Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
     }
@@ -420,7 +437,7 @@ pub async fn gallery_delete_folder(body: web::Json<DeletePayload>) -> impl Respo
         return HttpResponse::BadRequest().body("Path is not a folder");
     }
     match std::fs::remove_dir_all(&abs) {
-        Ok(_)  => HttpResponse::Ok().body("Deleted"),
+        Ok(_) => HttpResponse::Ok().body("Deleted"),
         Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
     }
 }
@@ -439,10 +456,11 @@ pub async fn gallery_delete(body: web::Json<DeletePayload>) -> impl Responder {
     let cache_name = rel.replace(['/', '\\'], "_") + ".jpg";
     let _ = std::fs::remove_file(PathBuf::from(THUMB_CACHE).join(cache_name));
     let _ = std::fs::remove_file(
-        PathBuf::from(PREVIEW_DIR).join(PathBuf::from(&rel).with_extension("jpg")));
+        PathBuf::from(PREVIEW_DIR).join(PathBuf::from(&rel).with_extension("jpg")),
+    );
 
     match std::fs::remove_file(&abs) {
-        Ok(_)  => HttpResponse::Ok().body("Deleted"),
+        Ok(_) => HttpResponse::Ok().body("Deleted"),
         Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
     }
 }
@@ -456,21 +474,21 @@ pub struct PlateSolvePayload {
 
 #[derive(Serialize)]
 pub struct PlateSolveResponse {
-    pub success:                bool,
-    pub ra_deg:                 Option<f64>,
-    pub dec_deg:                Option<f64>,
+    pub success: bool,
+    pub ra_deg: Option<f64>,
+    pub dec_deg: Option<f64>,
     pub scale_arcsec_per_pixel: Option<f64>,
-    pub rotation_deg:           Option<f64>,
-    pub message:                String,
+    pub rotation_deg: Option<f64>,
+    pub message: String,
 }
 
 /// Parse RA / DEC / FOCAL / XPIXSZ out of the JSON produced by `cmd_tiffhdr`.
 fn parse_tiffhdr_meta(json_str: &str) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
     let v: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
-    let ra  = v["RA"]    .as_str().and_then(|s| s.trim().parse().ok());
-    let dec = v["DEC"]   .as_str().and_then(|s| s.trim().parse().ok());
-    let px  = v["XPIXSZ"].as_str().and_then(|s| s.trim().parse().ok());
-    let fo  = v["FOCAL"] .as_str().and_then(|s| s.trim().parse().ok());
+    let ra = v["RA"].as_str().and_then(|s| s.trim().parse().ok());
+    let dec = v["DEC"].as_str().and_then(|s| s.trim().parse().ok());
+    let px = v["XPIXSZ"].as_str().and_then(|s| s.trim().parse().ok());
+    let fo = v["FOCAL"].as_str().and_then(|s| s.trim().parse().ok());
     (ra, dec, px, fo)
 }
 
@@ -489,8 +507,12 @@ pub async fn gallery_platesolve(
 
     if !abs.exists() {
         return HttpResponse::Ok().json(PlateSolveResponse {
-            success: false, ra_deg: None, dec_deg: None,
-            scale_arcsec_per_pixel: None, rotation_deg: None, message: "File not found".into(),
+            success: false,
+            ra_deg: None,
+            dec_deg: None,
+            scale_arcsec_per_pixel: None,
+            rotation_deg: None,
+            message: "File not found".into(),
         });
     }
 
@@ -511,8 +533,8 @@ pub async fn gallery_platesolve(
         }
     };
 
-    let abs_str     = abs.to_str().unwrap_or("").to_string();
-    let event_tx    = data.event_sender.clone();
+    let abs_str = abs.to_str().unwrap_or("").to_string();
+    let event_tx = data.event_sender.clone();
 
     let solve_out = tokio::task::spawn_blocking(move || {
         // For FITS files use fitshdr (astropy); for legacy TIFF use tiffhdr.
@@ -521,22 +543,21 @@ pub async fn gallery_platesolve(
         } else {
             "tiffhdr"
         };
-        let (ra_hint, dec_hint, px_hint, fo_hint) =
-            match run_raw_tool(&[hdr_cmd, &abs_str]) {
-                Ok(ref js) => parse_tiffhdr_meta(js),
-                Err(_)     => (None, None, None, None),
-            };
+        let (ra_hint, dec_hint, px_hint, fo_hint) = match run_raw_tool(&[hdr_cmd, &abs_str]) {
+            Ok(ref js) => parse_tiffhdr_meta(js),
+            Err(_) => (None, None, None, None),
+        };
 
-        let ra_deg  = ra_hint .unwrap_or(mount_ra_deg);
+        let ra_deg = ra_hint.unwrap_or(mount_ra_deg);
         let dec_deg = dec_hint.unwrap_or(mount_dec_deg);
-        let px      = px_hint .unwrap_or(pixel_size_um);
-        let fo      = fo_hint .unwrap_or(focal_mm).max(1.0);
+        let px = px_hint.unwrap_or(pixel_size_um);
+        let fo = fo_hint.unwrap_or(focal_mm).max(1.0);
 
-        let scale       = (206.265 * px) / fo;
-        let scale_lo    = format!("{:.4}", scale * 0.7);
-        let scale_hi    = format!("{:.4}", scale * 1.3);
-        let ra_s        = format!("{}", ra_deg);
-        let dec_s       = format!("{}", dec_deg);
+        let scale = (206.265 * px) / fo;
+        let scale_lo = format!("{:.4}", scale * 0.7);
+        let scale_hi = format!("{:.4}", scale * 1.3);
+        let ra_s = format!("{}", ra_deg);
+        let dec_s = format!("{}", dec_deg);
 
         let _ = event_tx.send(format!(
             "Plate solving {} (hint RA={:.2}° Dec={:.2}°, ~{:.2}\"/px)...",
@@ -549,10 +570,16 @@ pub async fn gallery_platesolve(
 
     // Helper to build a failure response — always JSON so the frontend can res.json() safely.
     let fail = |msg: String| {
-        let _ = data.event_sender.send(format!("Plate solve failed: {}", msg));
+        let _ = data
+            .event_sender
+            .send(format!("Plate solve failed: {}", msg));
         HttpResponse::Ok().json(PlateSolveResponse {
-            success: false, ra_deg: None, dec_deg: None,
-            scale_arcsec_per_pixel: None, rotation_deg: None, message: msg,
+            success: false,
+            ra_deg: None,
+            dec_deg: None,
+            scale_arcsec_per_pixel: None,
+            rotation_deg: None,
+            message: msg,
         })
     };
 
@@ -560,33 +587,47 @@ pub async fn gallery_platesolve(
         Ok(Ok(ref json_str)) if !json_str.trim().is_empty() => {
             match serde_json::from_str::<serde_json::Value>(json_str) {
                 Ok(v) => {
-                    let success  = v["success"].as_bool().unwrap_or(false);
-                    let ra_deg   = v["ra_deg"] .as_f64();
-                    let dec_deg  = v["dec_deg"].as_f64();
-                    let scale    = v["scale_arcsec_per_pixel"].as_f64();
+                    let success = v["success"].as_bool().unwrap_or(false);
+                    let ra_deg = v["ra_deg"].as_f64();
+                    let dec_deg = v["dec_deg"].as_f64();
+                    let scale = v["scale_arcsec_per_pixel"].as_f64();
                     let rotation = v["rotation_deg"].as_f64();
                     let message = if success {
                         let m = format!(
                             "Solved: RA {:.4}°  Dec {:.4}°  {:.3}\"/px  rot {:.1}°",
-                            ra_deg.unwrap_or(0.0), dec_deg.unwrap_or(0.0),
-                            scale.unwrap_or(0.0), rotation.unwrap_or(0.0),
+                            ra_deg.unwrap_or(0.0),
+                            dec_deg.unwrap_or(0.0),
+                            scale.unwrap_or(0.0),
+                            rotation.unwrap_or(0.0),
                         );
                         let _ = data.event_sender.send(m.clone());
                         m
                     } else {
-                        v["error"].as_str().unwrap_or("No solution found").to_string()
+                        v["error"]
+                            .as_str()
+                            .unwrap_or("No solution found")
+                            .to_string()
                     };
                     HttpResponse::Ok().json(PlateSolveResponse {
-                        success, ra_deg, dec_deg,
-                        scale_arcsec_per_pixel: scale, rotation_deg: rotation, message,
+                        success,
+                        ra_deg,
+                        dec_deg,
+                        scale_arcsec_per_pixel: scale,
+                        rotation_deg: rotation,
+                        message,
                     })
                 }
-                Err(e) => fail(format!("Bad solver output: {e} — raw: {}", json_str.chars().take(200).collect::<String>())),
+                Err(e) => fail(format!(
+                    "Bad solver output: {e} — raw: {}",
+                    json_str.chars().take(200).collect::<String>()
+                )),
             }
         }
-        Ok(Ok(_empty)) => fail("Solver produced no output (check Python / astrometry install)".into()),
-        Ok(Err(e))     => fail(e),
-        Err(e)         => fail(format!("Spawning task failed: {e}")),
+        Ok(Ok(_empty)) => {
+            fail("Solver produced no output (check Python / astrometry install)".into())
+        }
+        Ok(Err(e)) => fail(e),
+        Err(e) => fail(format!("Spawning task failed: {e}")),
     }
 }
 
@@ -600,8 +641,11 @@ pub async fn gallery_platesolve_snap(data: web::Data<AppState>) -> impl Responde
 
     if !std::path::Path::new(&abs_str).exists() {
         return HttpResponse::Ok().json(PlateSolveResponse {
-            success: false, ra_deg: None, dec_deg: None,
-            scale_arcsec_per_pixel: None, rotation_deg: None,
+            success: false,
+            ra_deg: None,
+            dec_deg: None,
+            scale_arcsec_per_pixel: None,
+            rotation_deg: None,
             message: "No snap available — take a preview first.".into(),
         });
     }
@@ -636,11 +680,11 @@ pub async fn gallery_platesolve_snap(data: web::Data<AppState>) -> impl Responde
             .unwrap_or(1.0);
 
         let sensor_scale = (206.265 * pixel_size_um) / focal_mm.max(1.0);
-        let scale    = sensor_scale * scale_factor;
+        let scale = sensor_scale * scale_factor;
         let scale_lo = format!("{:.4}", scale * 0.7);
         let scale_hi = format!("{:.4}", scale * 1.3);
-        let ra_s     = format!("{}", mount_ra_deg);
-        let dec_s    = format!("{}", mount_dec_deg);
+        let ra_s = format!("{}", mount_ra_deg);
+        let dec_s = format!("{}", mount_dec_deg);
 
         println!(
             "[platesolve_snap] file={abs_str}  hint RA={mount_ra_deg:.3}° Dec={mount_dec_deg:.3}°  \
@@ -654,16 +698,25 @@ pub async fn gallery_platesolve_snap(data: web::Data<AppState>) -> impl Responde
 
         let t = std::time::Instant::now();
         let result = run_raw_tool(&["solve", &abs_str, &ra_s, &dec_s, &scale_lo, &scale_hi]);
-        println!("[platesolve_snap] solver returned in {:.1}s", t.elapsed().as_secs_f64());
+        println!(
+            "[platesolve_snap] solver returned in {:.1}s",
+            t.elapsed().as_secs_f64()
+        );
         result
     })
     .await;
 
     let fail = |msg: String| {
-        let _ = data.event_sender.send(format!("Snap plate solve failed: {}", msg));
+        let _ = data
+            .event_sender
+            .send(format!("Snap plate solve failed: {}", msg));
         HttpResponse::Ok().json(PlateSolveResponse {
-            success: false, ra_deg: None, dec_deg: None,
-            scale_arcsec_per_pixel: None, rotation_deg: None, message: msg,
+            success: false,
+            ra_deg: None,
+            dec_deg: None,
+            scale_arcsec_per_pixel: None,
+            rotation_deg: None,
+            message: msg,
         })
     };
 
@@ -671,25 +724,34 @@ pub async fn gallery_platesolve_snap(data: web::Data<AppState>) -> impl Responde
         Ok(Ok(ref json_str)) if !json_str.trim().is_empty() => {
             match serde_json::from_str::<serde_json::Value>(json_str) {
                 Ok(v) => {
-                    let success  = v["success"].as_bool().unwrap_or(false);
-                    let ra_deg   = v["ra_deg"].as_f64();
-                    let dec_deg  = v["dec_deg"].as_f64();
-                    let scale    = v["scale_arcsec_per_pixel"].as_f64();
+                    let success = v["success"].as_bool().unwrap_or(false);
+                    let ra_deg = v["ra_deg"].as_f64();
+                    let dec_deg = v["dec_deg"].as_f64();
+                    let scale = v["scale_arcsec_per_pixel"].as_f64();
                     let rotation = v["rotation_deg"].as_f64();
                     let message = if success {
                         let m = format!(
                             "Solved: RA {:.4}°  Dec {:.4}°  {:.3}\"/px  rot {:.1}°",
-                            ra_deg.unwrap_or(0.0), dec_deg.unwrap_or(0.0),
-                            scale.unwrap_or(0.0), rotation.unwrap_or(0.0),
+                            ra_deg.unwrap_or(0.0),
+                            dec_deg.unwrap_or(0.0),
+                            scale.unwrap_or(0.0),
+                            rotation.unwrap_or(0.0),
                         );
                         let _ = data.event_sender.send(m.clone());
                         m
                     } else {
-                        v["error"].as_str().unwrap_or("No solution found").to_string()
+                        v["error"]
+                            .as_str()
+                            .unwrap_or("No solution found")
+                            .to_string()
                     };
                     HttpResponse::Ok().json(PlateSolveResponse {
-                        success, ra_deg, dec_deg,
-                        scale_arcsec_per_pixel: scale, rotation_deg: rotation, message,
+                        success,
+                        ra_deg,
+                        dec_deg,
+                        scale_arcsec_per_pixel: scale,
+                        rotation_deg: rotation,
+                        message,
                     })
                 }
                 Err(e) => fail(format!("Bad solver output: {e}")),
@@ -697,6 +759,6 @@ pub async fn gallery_platesolve_snap(data: web::Data<AppState>) -> impl Responde
         }
         Ok(Ok(_)) => fail("Solver produced no output".into()),
         Ok(Err(e)) => fail(e),
-        Err(e)     => fail(format!("Task error: {e}")),
+        Err(e) => fail(format!("Task error: {e}")),
     }
 }

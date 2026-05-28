@@ -226,8 +226,7 @@ pub async fn handle_start_sequence(
 
             // --- GoTo (unless skipped) ---
             if !group.skip_goto.unwrap_or(false) {
-                if let (Some(ra_str), Some(dec_str)) = (group.ra.as_deref(), group.dec.as_deref())
-                {
+                if let (Some(ra_str), Some(dec_str)) = (group.ra.as_deref(), group.dec.as_deref()) {
                     let _ = data_clone.event_sender.send(format!(
                         "Group {}/{}: Slewing to {}...",
                         group_idx + 1,
@@ -267,8 +266,7 @@ pub async fn handle_start_sequence(
                                 )
                                 .await;
                                 if let Err(e) = goto_result {
-                                    let msg =
-                                        format!("GoTo failed for {}: {}", group.target, e);
+                                    let msg = format!("GoTo failed for {}: {}", group.target, e);
                                     eprintln!("{}", msg);
                                     let _ = data_clone.event_sender.send(msg);
                                     all_ok = false;
@@ -291,30 +289,28 @@ pub async fn handle_start_sequence(
             }
 
             // --- Build per-group meridian-flip config ---
-            let flip_config: Option<MeridianFlipConfig> =
-                if payload.meridian_flip.unwrap_or(false) {
-                    let ra_h = group.ra.as_deref().and_then(|s| parse_hms(s));
-                    let dec_deg = group.dec.as_deref().and_then(|s| parse_dms(s));
-                    match (ra_h, dec_deg) {
-                        (Some(ra), Some(dec)) => {
-                            let longitude = {
-                                let loc = data_clone.location.lock().await;
-                                loc.longitude
-                            };
-                            Some(MeridianFlipConfig {
-                                longitude_deg: longitude,
-                                target_ra_h: ra,
-                                target_dec_deg: dec,
-                                post_meridian_limit_h: payload
-                                    .post_meridian_limit_h
-                                    .unwrap_or(0.1),
-                            })
-                        }
-                        _ => None,
+            let flip_config: Option<MeridianFlipConfig> = if payload.meridian_flip.unwrap_or(false)
+            {
+                let ra_h = group.ra.as_deref().and_then(|s| parse_hms(s));
+                let dec_deg = group.dec.as_deref().and_then(|s| parse_dms(s));
+                match (ra_h, dec_deg) {
+                    (Some(ra), Some(dec)) => {
+                        let longitude = {
+                            let loc = data_clone.location.lock().await;
+                            loc.longitude
+                        };
+                        Some(MeridianFlipConfig {
+                            longitude_deg: longitude,
+                            target_ra_h: ra,
+                            target_dec_deg: dec,
+                            post_meridian_limit_h: payload.post_meridian_limit_h.unwrap_or(0.1),
+                        })
                     }
-                } else {
-                    None
-                };
+                    _ => None,
+                }
+            } else {
+                None
+            };
 
             {
                 let mut afc = data_clone.active_flip_config.lock().await;
@@ -333,7 +329,7 @@ pub async fn handle_start_sequence(
             // Build recenter target from this group's RA/Dec (only when recenter is enabled)
             let recenter_every = payload.recenter_every.unwrap_or(0);
             let recenter_target: Option<(f64, f64)> = if recenter_every > 0 {
-                let ra_h   = group.ra.as_deref().and_then(|s| parse_hms(s));
+                let ra_h = group.ra.as_deref().and_then(|s| parse_hms(s));
                 let dec_deg = group.dec.as_deref().and_then(|s| parse_dms(s));
                 match (ra_h, dec_deg) {
                     (Some(ra), Some(dec)) => Some((ra, dec)),
@@ -360,7 +356,11 @@ pub async fn handle_start_sequence(
                 cam_config.pixel_size_micron,
                 recenter_every,
                 recenter_target,
-                if recenter_every > 0 { Some(&cam_config) } else { None },
+                if recenter_every > 0 {
+                    Some(&cam_config)
+                } else {
+                    None
+                },
                 platesolving_exposure,
                 &camera_model,
                 &custom_suffix,

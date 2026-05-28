@@ -126,7 +126,7 @@ pub async fn goto_closed_loop(
 
         // Great-circle separation: apply cos(dec) to the RA component so that
         // an RA difference in hours maps to the correct on-sky angle.
-        let dra_deg  = (target_ra - solved_ra) * 15.0 * target_dec.to_radians().cos();
+        let dra_deg = (target_ra - solved_ra) * 15.0 * target_dec.to_radians().cos();
         let ddec_deg = target_dec - solved_dec;
         distance_arcsec = dra_deg.hypot(ddec_deg) * 3600.0;
 

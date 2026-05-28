@@ -11,8 +11,7 @@ use tokio::sync::broadcast::Sender;
 // Removed chrono import plan as discussed, using string injection from payload
 
 use astro_pi_plate_solving::{
-    Arcdegrees, CameraConfig, CoordinateEquatorial,
-    PlateSolvingResult, RaHoursMinutesSeconds,
+    Arcdegrees, CameraConfig, CoordinateEquatorial, PlateSolvingResult, RaHoursMinutesSeconds,
 };
 
 use crate::astrometry_solver::{raw_to_jpeg_fast, solve_with_astrometry};
@@ -141,21 +140,24 @@ pub async fn capture_and_solve(
     // tokio runtime stays free to handle other requests while solving.
     // CoordinateEquatorial is not Clone/Copy, so extract primitive values.
     let solution = {
-        let img   = image_path.clone();
-        let ra_h  = initial_guess.ra.to_hours();
+        let img = image_path.clone();
+        let ra_h = initial_guess.ra.to_hours();
         let dec_d = initial_guess.dec.to_degrees();
-        let cfg   = cam_config.clone();
-        match tokio::task::spawn_blocking(move || -> Result<PlateSolvingResult, Box<dyn std::error::Error + Send + Sync>> {
-            let guess = CoordinateEquatorial::from_radians(
-                ra_h  * std::f64::consts::PI / 12.0,
-                dec_d * std::f64::consts::PI / 180.0,
-            );
-            solve_with_astrometry(&img, &guess, &cfg)
-                .map_err(|e| format!("{e}").into())
-        }).await {
-            Ok(Ok(s))  => s,
+        let cfg = cam_config.clone();
+        match tokio::task::spawn_blocking(
+            move || -> Result<PlateSolvingResult, Box<dyn std::error::Error + Send + Sync>> {
+                let guess = CoordinateEquatorial::from_radians(
+                    ra_h * std::f64::consts::PI / 12.0,
+                    dec_d * std::f64::consts::PI / 180.0,
+                );
+                solve_with_astrometry(&img, &guess, &cfg).map_err(|e| format!("{e}").into())
+            },
+        )
+        .await
+        {
+            Ok(Ok(s)) => s,
             Ok(Err(e)) => return Err(format!("{e}").into()),
-            Err(e)     => return Err(format!("plate-solve task panicked: {e}").into()),
+            Err(e) => return Err(format!("plate-solve task panicked: {e}").into()),
         }
     };
     let solve_time = solve_start.elapsed();
@@ -247,7 +249,7 @@ pub async fn run_sequence(
     focal_mm: f64,
     pixel_size_um: f64,
     recenter_every: u32,
-    recenter_target: Option<(f64, f64)>,  // (ra_hours, dec_deg)
+    recenter_target: Option<(f64, f64)>, // (ra_hours, dec_deg)
     recenter_cam_config: Option<&CameraConfig>,
     recenter_platesolve_secs: f64,
     camera_model: &str,
@@ -294,7 +296,11 @@ pub async fn run_sequence(
         };
 
         let current_save_dir = if let Some(ref sub) = subfolder {
-            settings.save_directory.join(sub).join(target).join(type_name)
+            settings
+                .save_directory
+                .join(sub)
+                .join(target)
+                .join(type_name)
         } else {
             settings.save_directory.join(target).join(type_name)
         };
@@ -499,19 +505,19 @@ pub async fn run_sequence(
                 let date_bg = date_str.to_string();
                 let idx = current_global_idx;
                 let total = total_count;
-                let ra_bg           = mount_ra_deg;
-                let dec_bg          = mount_dec_deg;
-                let focal_bg        = focal_mm;
-                let pixel_bg        = pixel_size_um;
-                let exp_bg          = exposure;
-                let iso_bg          = settings.iso;
+                let ra_bg = mount_ra_deg;
+                let dec_bg = mount_dec_deg;
+                let focal_bg = focal_mm;
+                let pixel_bg = pixel_size_um;
+                let exp_bg = exposure;
+                let iso_bg = settings.iso;
                 let camera_model_bg = camera_model.to_string();
                 let custom_suffix_bg = custom_suffix.to_string();
-                let item_type_bg    = match item.item_type {
+                let item_type_bg = match item.item_type {
                     SequenceType::Light => "Light",
-                    SequenceType::Dark  => "Dark",
-                    SequenceType::Flat  => "Flat",
-                    SequenceType::Bias  => "Bias",
+                    SequenceType::Dark => "Dark",
+                    SequenceType::Flat => "Flat",
+                    SequenceType::Bias => "Bias",
                 };
 
                 prev_post_task = Some(tokio::task::spawn_blocking(move || {
@@ -530,8 +536,7 @@ pub async fn run_sequence(
                         };
                         let new_filename = format!(
                             "{}_{}_{}{}{}_{:04}.{}",
-                            target_bg, date_bg, item_type_bg,
-                            model_part, suffix_part, idx, ext_str
+                            target_bg, date_bg, item_type_bg, model_part, suffix_part, idx, ext_str
                         );
                         let new_path = save_dir_bg.join(&new_filename);
                         if let Err(e) = std::fs::rename(&path_bg, &new_path) {
@@ -548,19 +553,22 @@ pub async fn run_sequence(
                                     let _ = sender_bg.send("SEQ_IMAGE_READY".to_string());
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to convert sequence image for preview: {}", e);
+                                    eprintln!(
+                                        "Failed to convert sequence image for preview: {}",
+                                        e
+                                    );
                                 }
                             }
 
                             // Auto-convert RAW → 16-bit Bayer FITS with mount metadata for Siril
                             let fits_path = new_path.with_extension("fits");
                             if !fits_path.exists() {
-                                let ra_str  = ra_bg .map(|v| format!("{v:.6}")).unwrap_or_default();
+                                let ra_str = ra_bg.map(|v| format!("{v:.6}")).unwrap_or_default();
                                 let dec_str = dec_bg.map(|v| format!("{v:.6}")).unwrap_or_default();
                                 let out = std::process::Command::new("python3")
                                     .arg("scripts/raw_tools.py")
                                     .args([
-                                        "tiff",   // command still named "tiff", now outputs FITS
+                                        "tiff", // command still named "tiff", now outputs FITS
                                         new_path.to_str().unwrap_or(""),
                                         fits_path.to_str().unwrap_or(""),
                                         &target_bg,
@@ -581,7 +589,10 @@ pub async fn run_sequence(
                                         let _ = sender_bg.send(format!("FITS saved: {stem}"));
                                         // Delete the RAW — only the FITS is kept.
                                         if let Err(e) = std::fs::remove_file(&new_path) {
-                                            eprintln!("Failed to delete RAW {}: {e}", new_path.display());
+                                            eprintln!(
+                                                "Failed to delete RAW {}: {e}",
+                                                new_path.display()
+                                            );
                                         }
                                     }
                                     Ok(o) => eprintln!(

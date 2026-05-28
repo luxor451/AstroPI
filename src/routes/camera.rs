@@ -145,7 +145,9 @@ pub async fn start_livefeed(
     }
 
     let cam_settings = data.camera_settings.lock().await.clone();
-    let exposure = payload.exposure.unwrap_or(cam_settings.platesolving_exposure);
+    let exposure = payload
+        .exposure
+        .unwrap_or(cam_settings.platesolving_exposure);
     let iso = payload.iso.unwrap_or(cam_settings.iso);
 
     {
@@ -197,9 +199,7 @@ pub async fn start_livefeed(
                     std::fs::remove_file(&path).ok();
                 }
                 Err(e) => {
-                    if !e.to_lowercase().contains("cancel")
-                        && !e.to_lowercase().contains("abort")
-                    {
+                    if !e.to_lowercase().contains("cancel") && !e.to_lowercase().contains("abort") {
                         eprintln!("Livefeed error: {}", e);
                         let _ = data_clone
                             .event_sender
@@ -290,8 +290,7 @@ pub async fn handle_connect_camera(data: web::Data<AppState>) -> impl Responder 
             let _ = data
                 .event_sender
                 .send(format!("Failed to connect to camera: {}", e));
-            HttpResponse::InternalServerError()
-                .body(format!("Failed to connect to camera: {}", e))
+            HttpResponse::InternalServerError().body(format!("Failed to connect to camera: {}", e))
         }
     }
 }

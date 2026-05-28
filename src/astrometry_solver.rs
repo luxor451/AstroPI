@@ -20,13 +20,16 @@ use astro_pi_plate_solving::{CameraConfig, CoordinateEquatorial, PlateSolvingRes
 ///     the codebase which also uses CWD-relative paths for imgs/, fits/, etc.)
 /// Convert a RAW file (CR3 / DNG / NEF …) to JPEG using rawpy's embedded-thumbnail
 /// fast path — bypasses dnglab entirely.  ~50–800 ms vs 10–30 s with dnglab.
-pub fn raw_to_jpeg_fast(raw_path: &std::path::Path, jpeg_path: &std::path::Path) -> Result<(), String> {
+pub fn raw_to_jpeg_fast(
+    raw_path: &std::path::Path,
+    jpeg_path: &std::path::Path,
+) -> Result<(), String> {
     let script = find_raw_tools();
     let out = std::process::Command::new("python3")
         .args([
             script.to_str().unwrap_or("scripts/raw_tools.py"),
             "snap_jpeg",
-            raw_path .to_str().unwrap_or(""),
+            raw_path.to_str().unwrap_or(""),
             jpeg_path.to_str().unwrap_or(""),
         ])
         .output()
@@ -79,12 +82,12 @@ pub fn solve_with_astrometry(
 ) -> Result<PlateSolvingResult, Box<dyn std::error::Error>> {
     let t0 = Instant::now();
 
-    let ra_deg  = initial_guess.ra.to_hours()  * 15.0;   // hours → degrees
+    let ra_deg = initial_guess.ra.to_hours() * 15.0; // hours → degrees
     let dec_deg = initial_guess.dec.to_degrees();
 
     // Build a ±60 % pixel-scale search window around the expected scale.
     let expected_scale = cam_config.expected_pixel_scale(); // arcsec / pixel
-    let scale_low  = (expected_scale * 0.40).max(0.1);
+    let scale_low = (expected_scale * 0.40).max(0.1);
     let scale_high = expected_scale * 1.60;
 
     // Search within 15° of the mount position (generous for a blind solve
@@ -161,14 +164,18 @@ pub fn solve_with_astrometry(
         });
     }
 
-    let ra_solved_deg  = parsed["ra_deg"].as_f64()
+    let ra_solved_deg = parsed["ra_deg"]
+        .as_f64()
         .ok_or("missing ra_deg in solver output")?;
-    let dec_solved_deg = parsed["dec_deg"].as_f64()
+    let dec_solved_deg = parsed["dec_deg"]
+        .as_f64()
         .ok_or("missing dec_deg in solver output")?;
-    let scale          = parsed["scale_arcsec_per_pixel"].as_f64().unwrap_or(expected_scale);
-    let logodds        = parsed["logodds"].as_f64().unwrap_or(0.0);
+    let scale = parsed["scale_arcsec_per_pixel"]
+        .as_f64()
+        .unwrap_or(expected_scale);
+    let logodds = parsed["logodds"].as_f64().unwrap_or(0.0);
 
-    let ra_rad  = ra_solved_deg.to_radians();
+    let ra_rad = ra_solved_deg.to_radians();
     let dec_rad = dec_solved_deg.to_radians();
 
     println!(

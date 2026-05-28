@@ -208,8 +208,7 @@ pub async fn handle_park(data: web::Data<AppState>) -> impl Responder {
         if let Err(e) = client.park().await {
             eprintln!("Failed to park: {}", e);
             let _ = data.event_sender.send(format!("Failed to park: {}", e));
-            return HttpResponse::InternalServerError()
-                .body(format!("Failed to park: {}", e));
+            return HttpResponse::InternalServerError().body(format!("Failed to park: {}", e));
         } else {
             println!("Park command sent.");
             let _ = data.event_sender.send("Park command sent.".to_string());
@@ -233,8 +232,7 @@ pub async fn handle_unpark(data: web::Data<AppState>) -> impl Responder {
         if let Err(e) = client.unpark().await {
             eprintln!("Failed to unpark: {}", e);
             let _ = data.event_sender.send(format!("Failed to unpark: {}", e));
-            return HttpResponse::InternalServerError()
-                .body(format!("Failed to unpark: {}", e));
+            return HttpResponse::InternalServerError().body(format!("Failed to unpark: {}", e));
         } else {
             println!("Unpark command sent.");
             let _ = data.event_sender.send("Unpark command sent.".to_string());
