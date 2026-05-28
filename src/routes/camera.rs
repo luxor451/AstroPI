@@ -99,21 +99,18 @@ pub async fn take_preview(
     {
         Ok(path) => {
             let jpg_path = path.with_extension("jpg");
-            let result_response = match raw_to_jpeg_fast(&path, &jpg_path) {
+            match raw_to_jpeg_fast(&path, &jpg_path) {
                 Err(e) => {
                     eprintln!("Failed to convert preview: {}", e);
                     let _ = data
                         .event_sender
                         .send(format!("Failed to convert preview: {}", e));
+                    std::fs::remove_file(&path).ok();
                     HttpResponse::InternalServerError().body(format!("Conversion failed: {}", e))
                 }
                 Ok(sensor_width) => {
-                    // Resize to preview resolution before transfer (much smaller payload)
                     resize_jpeg_inplace(&jpg_path, PREVIEW_MAX_PX, PREVIEW_JPEG_QUALITY);
 
-                    // Compute scale_factor AFTER resize: sensor_px / current_jpeg_px.
-                    // This correctly handles full-res JPEG cameras (where resize shrinks
-                    // the image from e.g. 6720→1920px and sensor_width/1920 ≈ 3.5).
                     let scale_factor = if sensor_width > 0 {
                         let jpeg_w = image::image_dimensions(&jpg_path)
                             .map(|(w, _)| w)
@@ -129,17 +126,22 @@ pub async fn take_preview(
                         .event_sender
                         .send(format!("Preview saved at: {}", jpg_path.display()));
 
-                    // Persist as snap_latest.jpg for plate-solving and serving
                     let _ = std::fs::copy(&jpg_path, "imgs/snap_latest.jpg");
                     let _ = std::fs::write("imgs/snap_latest.jpg.scale_factor", scale_factor.to_string());
                     std::fs::remove_file(&jpg_path).ok();
-                    // Return a lightweight ready signal; the image is served at GET /snap_preview
+
+                    // Keep the RAW for plate-solving. Delete any previous snap RAW first.
+                    if let Ok(prev) = std::fs::read_to_string("imgs/snap_latest.raw_path") {
+                        let prev = PathBuf::from(prev.trim());
+                        if prev != path {
+                            std::fs::remove_file(&prev).ok();
+                        }
+                    }
+                    let _ = std::fs::write("imgs/snap_latest.raw_path", path.to_string_lossy().as_ref());
+
                     HttpResponse::Ok().body("preview_ready")
                 }
-            };
-
-            std::fs::remove_file(path).ok();
-            result_response
+            }
         }
         Err(e) => {
             eprintln!("Preview failed: {}", e);

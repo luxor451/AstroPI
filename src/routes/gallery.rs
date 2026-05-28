@@ -6,7 +6,7 @@ use std::time::UNIX_EPOCH;
 
 use astro_pi_plate_solving::CoordinateEquatorial;
 
-use crate::capture_solve::{capture_and_solve, CaptureSettings};
+use crate::astrometry_solver::solve_with_astrometry;
 use crate::state::AppState;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -636,13 +636,39 @@ pub async fn gallery_platesolve(
 
 /// POST /platesolve_snap
 ///
-/// Captures a fresh image (using plate-solving exposure settings) and solves it
-/// at full sensor resolution — identical code path to the goto closed-loop solver.
+/// Plate-solves the RAW file kept from the last `take_preview` call.
+/// No new capture — uses the saved full-resolution sensor file directly,
+/// identical to the goto closed-loop solver path.
 #[post("/platesolve_snap")]
 pub async fn gallery_platesolve_snap(data: web::Data<AppState>) -> impl Responder {
-    let (iso, platesolving_exposure, cam_config) = {
+    let raw_path = match std::fs::read_to_string("imgs/snap_latest.raw_path") {
+        Ok(p) => PathBuf::from(p.trim().to_string()),
+        Err(_) => {
+            return HttpResponse::Ok().json(PlateSolveResponse {
+                success: false,
+                ra_deg: None,
+                dec_deg: None,
+                scale_arcsec_per_pixel: None,
+                rotation_deg: None,
+                message: "No snap available — take a preview first.".into(),
+            });
+        }
+    };
+
+    if !raw_path.exists() {
+        return HttpResponse::Ok().json(PlateSolveResponse {
+            success: false,
+            ra_deg: None,
+            dec_deg: None,
+            scale_arcsec_per_pixel: None,
+            rotation_deg: None,
+            message: "Snap RAW file no longer exists — take a new preview.".into(),
+        });
+    }
+
+    let cam_config = {
         let s = data.camera_settings.lock().await;
-        (s.iso, s.platesolving_exposure, s.to_camera_config())
+        s.to_camera_config()
     };
 
     let (mount_ra_h, mount_dec_deg) = {
@@ -654,83 +680,63 @@ pub async fn gallery_platesolve_snap(data: web::Data<AppState>) -> impl Responde
         }
     };
 
-    let camera_guard = data.camera.lock().await;
-    let camera = match camera_guard.as_ref() {
-        Some(c) => c,
-        None => {
-            return HttpResponse::Ok().json(PlateSolveResponse {
-                success: false,
-                ra_deg: None,
-                dec_deg: None,
-                scale_arcsec_per_pixel: None,
-                rotation_deg: None,
-                message: "Camera not connected".into(),
-            });
-        }
-    };
-
     let initial_guess = CoordinateEquatorial::from_radians(
         mount_ra_h * std::f64::consts::PI / 12.0,
         mount_dec_deg * std::f64::consts::PI / 180.0,
     );
-    let settings = CaptureSettings {
-        iso,
-        aperture: None,
-        exposure_seconds: platesolving_exposure,
-        save_directory: PathBuf::from("imgs/platesolve_tmp"),
-    };
 
     let _ = data.event_sender.send(format!(
-        "Plate solving snap (hint RA={:.2}° Dec={:.2}°, {:.1}s)...",
+        "Plate solving snap (hint RA={:.2}° Dec={:.2}°)...",
         mount_ra_h * 15.0,
         mount_dec_deg,
-        platesolving_exposure,
     ));
 
-    match capture_and_solve(camera, &initial_guess, &settings, &cam_config).await {
-        Ok(result) => {
-            std::fs::remove_file(&result.image_path).ok();
-            if result.solution.coeffs_x.is_some() {
-                let ra_deg = result.solution.solution_ra_deg;
-                let dec_deg = result.solution.solution_dec_deg;
+    let solve_out = tokio::task::spawn_blocking(move || {
+        let t = std::time::Instant::now();
+        let result = solve_with_astrometry(&raw_path, &initial_guess, &cam_config)
+            .map_err(|e| e.to_string());
+        println!("[platesolve_snap] solver returned in {:.1}s", t.elapsed().as_secs_f64());
+        result
+    })
+    .await;
+
+    let fail = |msg: String| {
+        let _ = data.event_sender.send(format!("Snap plate solve failed: {}", msg));
+        HttpResponse::Ok().json(PlateSolveResponse {
+            success: false,
+            ra_deg: None,
+            dec_deg: None,
+            scale_arcsec_per_pixel: None,
+            rotation_deg: None,
+            message: msg,
+        })
+    };
+
+    match solve_out {
+        Ok(Ok(solution)) => {
+            if solution.coeffs_x.is_some() {
+                let ra_deg = solution.solution_ra_deg;
+                let dec_deg = solution.solution_dec_deg;
                 let m = format!(
                     "Solved: RA {:.4}°  Dec {:.4}°  {:.3}\"/px  rot {:.1}°",
-                    ra_deg,
-                    dec_deg,
-                    result.solution.scale_arcsec_per_pixel,
-                    result.solution.rotation_deg,
+                    ra_deg, dec_deg,
+                    solution.scale_arcsec_per_pixel,
+                    solution.rotation_deg,
                 );
                 let _ = data.event_sender.send(m.clone());
                 HttpResponse::Ok().json(PlateSolveResponse {
                     success: true,
                     ra_deg: Some(ra_deg),
                     dec_deg: Some(dec_deg),
-                    scale_arcsec_per_pixel: Some(result.solution.scale_arcsec_per_pixel),
-                    rotation_deg: Some(result.solution.rotation_deg),
+                    scale_arcsec_per_pixel: Some(solution.scale_arcsec_per_pixel),
+                    rotation_deg: Some(solution.rotation_deg),
                     message: m,
                 })
             } else {
-                let _ = data.event_sender.send("Snap plate solve: no solution found".into());
-                HttpResponse::Ok().json(PlateSolveResponse {
-                    success: false,
-                    ra_deg: None,
-                    dec_deg: None,
-                    scale_arcsec_per_pixel: None,
-                    rotation_deg: None,
-                    message: "No solution found".into(),
-                })
+                fail("No solution found".into())
             }
         }
-        Err(e) => {
-            let _ = data.event_sender.send(format!("Snap plate solve failed: {e}"));
-            HttpResponse::Ok().json(PlateSolveResponse {
-                success: false,
-                ra_deg: None,
-                dec_deg: None,
-                scale_arcsec_per_pixel: None,
-                rotation_deg: None,
-                message: e.to_string(),
-            })
-        }
+        Ok(Err(e)) => fail(e.to_string()),
+        Err(e) => fail(format!("Task error: {e}")),
     }
 }
