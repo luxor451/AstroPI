@@ -503,18 +503,18 @@ def cmd_snap_jpeg(input_path: str, output_path: str):
                 scale_factor = full_w / thumb_w
                 kb = len(thumb.data) // 1024
                 print(f"[snap_jpeg] embedded JPEG {thumb_w}x{thumb_h} (sensor {full_w}x{full_h})  "
-                      f"scale_factor={scale_factor:.2f}  {kb} KB  {_time.perf_counter()-t0:.2f}s",
+                      f"sensor_width={full_w}  {kb} KB  {_time.perf_counter()-t0:.2f}s",
                       file=sys.stderr)
-                _write_scale_factor(output_path, scale_factor)
+                _write_scale_factor(output_path, full_w)
                 return
             elif thumb.format == rawpy.ThumbFormat.BITMAP:
                 img = Image.fromarray(thumb.data)
                 thumb_w, thumb_h = img.size
                 scale_factor = full_w / thumb_w
                 img.save(output_path, 'JPEG', quality=90)
-                print(f"[snap_jpeg] bitmap thumbnail {thumb_w}x{thumb_h}  scale_factor={scale_factor:.2f}  "
+                print(f"[snap_jpeg] bitmap thumbnail {thumb_w}x{thumb_h}  sensor_width={full_w}  "
                       f"{_time.perf_counter()-t0:.2f}s", file=sys.stderr)
-                _write_scale_factor(output_path, scale_factor)
+                _write_scale_factor(output_path, full_w)
                 return
         except Exception as ex:
             print(f"[snap_jpeg] no embedded thumbnail ({ex}), falling back to rawpy decode", file=sys.stderr)
@@ -525,19 +525,26 @@ def cmd_snap_jpeg(input_path: str, output_path: str):
         scale_factor = full_w / w_out if w_out > 0 else 2.0
 
     Image.fromarray(rgb).save(output_path, 'JPEG', quality=90)
-    print(f"[snap_jpeg] rawpy half-size decode  scale_factor={scale_factor:.2f}  "
+    print(f"[snap_jpeg] rawpy half-size decode  sensor_width={full_w}  "
           f"{_time.perf_counter()-t0:.2f}s", file=sys.stderr)
-    _write_scale_factor(output_path, scale_factor)
+    _write_scale_factor(output_path, full_w)
 
 
-def _write_scale_factor(jpeg_path: str, factor: float):
-    """Write the pixel-scale correction factor as a plain-text sidecar file."""
+def _write_scale_factor(jpeg_path: str, sensor_width_px: int):
+    """Write the original sensor width (pixels) to a sidecar file.
+
+    Rust reads this value, then divides by the actual JPEG width AFTER any
+    resize step to get the true scale_factor (sensor_px / jpeg_px).
+    Storing the raw sensor width (not the ratio) is required because Rust
+    resizes the preview JPEG before writing snap_latest.jpg, and the ratio
+    must be recomputed from the post-resize dimensions.
+    """
     sidecar = jpeg_path + '.scale_factor'
     try:
         with open(sidecar, 'w') as f:
-            f.write(str(factor))
+            f.write(str(int(sensor_width_px)))
     except Exception as ex:
-        print(f"[snap_jpeg] warning: could not write scale_factor sidecar: {ex}", file=sys.stderr)
+        print(f"[snap_jpeg] warning: could not write sensor_width sidecar: {ex}", file=sys.stderr)
 
 
 def cmd_fits(input_path: str, output_path: str,
