@@ -27,6 +27,7 @@ use routes::mount::{
     handle_abort, handle_disconnect, handle_goto, handle_manual_move, handle_meridian_flip,
     handle_park, handle_restart_indi, handle_unpark,
 };
+use routes::polar_align::polar_capture_solve;
 use routes::sequence::{handle_pause, handle_start_sequence, handle_stop};
 use routes::settings::{get_location, get_settings, update_location, update_settings};
 use routes::status::{handle_status, ping, receive_command, sse_events};
@@ -133,6 +134,8 @@ async fn main() -> std::io::Result<()> {
             .service(update_time)
             .service(handle_shutdown)
             .service(handle_reboot)
+            // Polar alignment
+            .service(polar_capture_solve)
             // Gallery
             .service(gallery_files)
             .service(gallery_thumbnail)
