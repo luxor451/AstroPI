@@ -1024,12 +1024,16 @@ def cmd_solve(image_path: str, ra_hint_deg: float, dec_hint_deg: float,
                     m = sol.best_match()
                     # Sanity check: solution must be within 35° of the hint
                     # (blind attempt has no constraint — always accept).
+                    # Uses great-circle separation — Euclidean (dRA²+dDec²)^½ is
+                    # wrong near the poles where RA lines converge.
                     if attempt["position_hint"] is not None:
-                        d_ra  = abs(m.center_ra_deg  - ra_hint_deg)
-                        d_dec = abs(m.center_dec_deg - dec_hint_deg)
-                        # RA wraps at 360°
-                        d_ra = min(d_ra, 360.0 - d_ra)
-                        dist = (d_ra ** 2 + d_dec ** 2) ** 0.5
+                        ra1r  = math.radians(ra_hint_deg)
+                        dec1r = math.radians(dec_hint_deg)
+                        ra2r  = math.radians(m.center_ra_deg)
+                        dec2r = math.radians(m.center_dec_deg)
+                        cos_d = (math.sin(dec1r) * math.sin(dec2r) +
+                                 math.cos(dec1r) * math.cos(dec2r) * math.cos(ra2r - ra1r))
+                        dist  = math.degrees(math.acos(max(-1.0, min(1.0, cos_d))))
                         if dist > 35.0:
                             print(f"  [TIMING] attempt '{attempt['label']}' rejected "
                                   f"(solution {dist:.1f}° from hint)", file=sys.stderr)
