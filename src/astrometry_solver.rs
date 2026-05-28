@@ -20,10 +20,13 @@ use astro_pi_plate_solving::{CameraConfig, CoordinateEquatorial, PlateSolvingRes
 ///     the codebase which also uses CWD-relative paths for imgs/, fits/, etc.)
 /// Convert a RAW file (CR3 / DNG / NEF …) to JPEG using rawpy's embedded-thumbnail
 /// fast path — bypasses dnglab entirely.  ~50–800 ms vs 10–30 s with dnglab.
+/// Returns the pixel-scale factor: (sensor_width / jpeg_width).
+/// 1.0 means the JPEG is full sensor resolution; 4.16 means a 1616px thumbnail
+/// from a 6720px sensor.  Callers that don't need it can use `map(|_| ())`.
 pub fn raw_to_jpeg_fast(
     raw_path: &std::path::Path,
     jpeg_path: &std::path::Path,
-) -> Result<(), String> {
+) -> Result<f64, String> {
     let script = find_raw_tools();
     let out = std::process::Command::new("python3")
         .args([
@@ -38,7 +41,17 @@ pub fn raw_to_jpeg_fast(
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(format!("snap_jpeg failed: {stderr}"));
     }
-    Ok(())
+    // Read the sidecar Python wrote, then remove it (we return the value directly).
+    let sidecar = format!("{}.scale_factor", jpeg_path.display());
+    let factor: f64 = std::fs::read_to_string(&sidecar)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or_else(|| {
+            eprintln!("[raw_to_jpeg_fast] scale_factor sidecar not found at {sidecar}");
+            1.0
+        });
+    let _ = std::fs::remove_file(&sidecar); // clean up; caller stores the value
+    Ok(factor)
 }
 
 pub fn find_raw_tools() -> PathBuf {

@@ -99,29 +99,30 @@ pub async fn take_preview(
     {
         Ok(path) => {
             let jpg_path = path.with_extension("jpg");
-            let result_response = if let Err(e) = raw_to_jpeg_fast(&path, &jpg_path) {
-                eprintln!("Failed to convert preview: {}", e);
-                let _ = data
-                    .event_sender
-                    .send(format!("Failed to convert preview: {}", e));
-                HttpResponse::InternalServerError().body(format!("Conversion failed: {}", e))
-            } else {
-                println!("Preview saved at: {}", jpg_path.display());
-                let _ = data
-                    .event_sender
-                    .send(format!("Preview saved at: {}", jpg_path.display()));
+            let result_response = match raw_to_jpeg_fast(&path, &jpg_path) {
+                Err(e) => {
+                    eprintln!("Failed to convert preview: {}", e);
+                    let _ = data
+                        .event_sender
+                        .send(format!("Failed to convert preview: {}", e));
+                    HttpResponse::InternalServerError().body(format!("Conversion failed: {}", e))
+                }
+                Ok(scale_factor) => {
+                    println!("Preview saved at: {} (scale_factor={:.2})", jpg_path.display(), scale_factor);
+                    let _ = data
+                        .event_sender
+                        .send(format!("Preview saved at: {}", jpg_path.display()));
 
-                // Resize to preview resolution before transfer (much smaller payload)
-                resize_jpeg_inplace(&jpg_path, PREVIEW_MAX_PX, PREVIEW_JPEG_QUALITY);
-                // Persist as snap_latest.jpg for plate-solving and serving
-                let _ = std::fs::copy(&jpg_path, "imgs/snap_latest.jpg");
-                // Copy the pixel-scale sidecar so platesolve_snap gets the correct arcsec/px
-                let sidecar_src = format!("{}.scale_factor", jpg_path.display());
-                let _ = std::fs::copy(&sidecar_src, "imgs/snap_latest.jpg.scale_factor");
-                std::fs::remove_file(&jpg_path).ok();
-                let _ = std::fs::remove_file(&sidecar_src);
-                // Return a lightweight ready signal; the image is served at GET /snap_preview
-                HttpResponse::Ok().body("preview_ready")
+                    // Resize to preview resolution before transfer (much smaller payload)
+                    resize_jpeg_inplace(&jpg_path, PREVIEW_MAX_PX, PREVIEW_JPEG_QUALITY);
+                    // Persist as snap_latest.jpg for plate-solving and serving
+                    let _ = std::fs::copy(&jpg_path, "imgs/snap_latest.jpg");
+                    // Write scale_factor returned directly by raw_to_jpeg_fast (no sidecar copy needed)
+                    let _ = std::fs::write("imgs/snap_latest.jpg.scale_factor", scale_factor.to_string());
+                    std::fs::remove_file(&jpg_path).ok();
+                    // Return a lightweight ready signal; the image is served at GET /snap_preview
+                    HttpResponse::Ok().body("preview_ready")
+                }
             };
 
             std::fs::remove_file(path).ok();
