@@ -11,10 +11,10 @@ use crate::state::AppState;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-const CAPTURES_ROOT: &str = "imgs/astro_captures";
-const THUMB_CACHE: &str = "imgs/.thumbnails";
-const PREVIEW_DIR: &str = "imgs/.previews";
-const FITS_DIR: &str = "imgs/fits";
+const CAPTURES_ROOT: &str = "/media/mmcblk1p1/astro_captures";
+const THUMB_CACHE: &str = "/media/mmcblk1p1/.thumbnails";
+const PREVIEW_DIR: &str = "/media/mmcblk1p1/.previews";
+const FITS_DIR: &str = "/media/mmcblk1p1/fits";
 const RAW_TOOLS: &str = "scripts/raw_tools.py";
 
 fn raw_ext(ext: &str) -> bool {

@@ -102,7 +102,7 @@ pub async fn handle_goto(
         iso: settings.iso,
         aperture: None,
         exposure_seconds: settings.platesolving_exposure,
-        save_directory: PathBuf::from("imgs/goto/captures"),
+        save_directory: PathBuf::from("/media/mmcblk1p1/goto/captures"),
     };
     let cam_config = settings.to_camera_config();
     drop(settings);

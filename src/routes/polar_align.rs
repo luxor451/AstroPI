@@ -1,7 +1,8 @@
 use actix_web::{post, web, HttpResponse, Responder};
 use astro_pi_plate_solving::CoordinateEquatorial;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 
 use crate::capture_solve::{capture_and_solve, CaptureSettings};
 use crate::state::AppState;
@@ -56,7 +57,7 @@ pub async fn polar_capture_solve(data: web::Data<AppState>) -> impl Responder {
         iso,
         aperture: None,
         exposure_seconds: exposure,
-        save_directory: PathBuf::from("imgs/polar_tmp"),
+        save_directory: PathBuf::from("/media/mmcblk1p1/polar_tmp"),
     };
 
     let _ = data.event_sender.send(format!(
@@ -104,6 +105,73 @@ pub async fn polar_capture_solve(data: web::Data<AppState>) -> impl Responder {
                 dec_deg: None,
                 message: e.to_string(),
             })
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct RotateRaPayload {
+    ra: String,
+    dec: String,
+}
+
+/// POST /polar_align/rotate — slew to the given RA/Dec while locking the
+/// current pier side so EQMod cannot do a pier flip mid-rotation.
+#[post("/polar_align/rotate")]
+pub async fn polar_rotate_ra(
+    data: web::Data<AppState>,
+    payload: web::Json<RotateRaPayload>,
+) -> impl Responder {
+    let client = {
+        let guard = data.indi_client.read().await;
+        match guard.as_ref() {
+            Some(c) => c.clone(),
+            None => return HttpResponse::InternalServerError().body("EQMod not connected"),
+        }
+    };
+
+    let ra_h = {
+        let parts: Vec<&str> = payload.ra.trim().split(':').collect();
+        if parts.len() != 3 {
+            return HttpResponse::BadRequest().body("Invalid RA format. Expected HH:MM:SS");
+        }
+        let h: f64 = parts[0].parse().unwrap_or(0.0);
+        let m: f64 = parts[1].parse().unwrap_or(0.0);
+        let s: f64 = parts[2].parse().unwrap_or(0.0);
+        h + m / 60.0 + s / 3600.0
+    };
+
+    let dec_deg = {
+        let parts: Vec<&str> = payload.dec.trim().split(':').collect();
+        if parts.len() != 3 {
+            return HttpResponse::BadRequest().body("Invalid Dec format. Expected DD:MM:SS");
+        }
+        let d: f64 = parts[0].parse().unwrap_or(0.0);
+        let m: f64 = parts[1].parse().unwrap_or(0.0);
+        let s: f64 = parts[2].parse().unwrap_or(0.0);
+        let sign = if d < 0.0 { -1.0 } else { 1.0 };
+        sign * (d.abs() + m / 60.0 + s / 3600.0)
+    };
+
+    data.is_running.store(true, Ordering::Relaxed);
+    let _ = data.event_sender.send(format!(
+        "Polar align: rotating to RA={:.4}h Dec={:.4}° (pier side locked)...",
+        ra_h, dec_deg
+    ));
+
+    let result = client
+        .goto_preserve_pier_side(ra_h, dec_deg, Some(&data.is_running))
+        .await;
+
+    data.is_running.store(false, Ordering::Relaxed);
+
+    match result {
+        Ok(_) => HttpResponse::Ok().body("ok"),
+        Err(e) => {
+            let msg = format!("Polar align rotate failed: {}", e);
+            eprintln!("{}", msg);
+            let _ = data.event_sender.send(msg.clone());
+            HttpResponse::InternalServerError().body(msg)
         }
     }
 }

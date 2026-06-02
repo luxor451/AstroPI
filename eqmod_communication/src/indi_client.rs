@@ -721,6 +721,38 @@ impl IndiClient {
         Ok(after)
     }
 
+    /// GoTo while keeping the mount on its current pier side — no flip allowed.
+    ///
+    /// Polar alignment rotates the RA axis by a fixed angle. A pier flip would
+    /// swing the mount hundreds of degrees in the opposite direction and can hit
+    /// the tripod, so we pin the pier side before issuing the slew.
+    pub async fn goto_preserve_pier_side(
+        &self,
+        ra: f64,
+        dec: f64,
+        is_running: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<()> {
+        let current_side = self.get_pier_side().await;
+        match current_side {
+            PierSide::West => {
+                self.send_switch("TELESCOPE_PIER_SIDE", &[
+                    ("PIER_WEST", true),
+                    ("PIER_EAST", false),
+                ]).await?;
+                sleep(Duration::from_millis(500)).await;
+            }
+            PierSide::East => {
+                self.send_switch("TELESCOPE_PIER_SIDE", &[
+                    ("PIER_WEST", false),
+                    ("PIER_EAST", true),
+                ]).await?;
+                sleep(Duration::from_millis(500)).await;
+            }
+            PierSide::Unknown => {}
+        }
+        self.goto(ra, dec, is_running).await
+    }
+
     // --------- internal helpers ---------
 
     /// Greenwich Mean Sidereal Time in hours for the current UTC instant.

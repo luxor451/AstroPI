@@ -102,6 +102,7 @@ pub async fn goto_closed_loop(
         // Platesolving step
         let result_platesolve =
             capture_and_solve(camera, &target_pos, &setting, cam_config).await?;
+        std::fs::remove_file(&result_platesolve.image_path).ok();
 
         // Skip correction entirely if plate solve returned no solution —
         // never sync to (0, 0) which would corrupt the mount's alignment model.

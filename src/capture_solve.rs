@@ -67,7 +67,7 @@ impl Default for CaptureSettings {
             iso: 6400,
             aperture: None,
             exposure_seconds: 5.0,
-            save_directory: PathBuf::from("tmp/astro_captures"),
+            save_directory: PathBuf::from("/media/mmcblk1p1/astro_captures"),
         }
     }
 }
@@ -409,7 +409,7 @@ pub async fn run_sequence(
                         iso: settings.iso,
                         aperture: None,
                         exposure_seconds: recenter_platesolve_secs,
-                        save_directory: PathBuf::from("imgs/goto/captures"),
+                        save_directory: PathBuf::from("/media/mmcblk1p1/goto/captures"),
                     };
 
                     let rc_coord = CoordinateEquatorial::from_radians(

@@ -76,7 +76,7 @@ pub async fn handle_start_sequence(
         iso,
         aperture: None,
         exposure_seconds: 0.0,
-        save_directory: PathBuf::from("imgs/astro_captures"),
+        save_directory: PathBuf::from("/media/mmcblk1p1/astro_captures"),
     };
 
     data.is_running.store(true, Ordering::Relaxed);
@@ -251,7 +251,7 @@ pub async fn handle_start_sequence(
                                 iso,
                                 aperture: None,
                                 exposure_seconds: platesolving_exposure,
-                                save_directory: PathBuf::from("imgs/goto/captures"),
+                                save_directory: PathBuf::from("/media/mmcblk1p1/goto/captures"),
                             };
                             if let Some(indi) = indi_ref {
                                 let goto_result = goto_closed_loop(

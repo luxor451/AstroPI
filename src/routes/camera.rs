@@ -84,7 +84,7 @@ pub async fn take_preview(
         iso, exposure_seconds, aperture
     ));
 
-    let preview_dir = PathBuf::from("imgs/previews");
+    let preview_dir = PathBuf::from("/media/mmcblk1p1/previews");
     if !preview_dir.exists() {
         if let Err(e) = std::fs::create_dir_all(&preview_dir) {
             eprintln!("Failed to create preview directory: {}", e);
