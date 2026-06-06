@@ -96,6 +96,8 @@ async fn main() -> std::io::Result<()> {
         active_flip_config: Mutex::new(None),
     });
 
+    std::fs::create_dir_all("imgs/livefeed").expect("Failed to create imgs/ directory");
+
     println!("Starting server at http://0.0.0.0:8080");
 
     HttpServer::new(move || {

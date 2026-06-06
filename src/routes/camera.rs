@@ -126,7 +126,9 @@ pub async fn take_preview(
                         .event_sender
                         .send(format!("Preview saved at: {}", jpg_path.display()));
 
-                    let _ = std::fs::copy(&jpg_path, "imgs/snap_latest.jpg");
+                    if let Err(e) = std::fs::copy(&jpg_path, "imgs/snap_latest.jpg") {
+                        eprintln!("Failed to copy snap preview to imgs/: {}", e);
+                    }
                     let _ = std::fs::write("imgs/snap_latest.jpg.scale_factor", scale_factor.to_string());
                     std::fs::remove_file(&jpg_path).ok();
 
@@ -181,7 +183,6 @@ pub async fn start_livefeed(
     let data_clone = data.clone();
     tokio::spawn(async move {
         let livefeed_dir = PathBuf::from("imgs/livefeed");
-        std::fs::create_dir_all(&livefeed_dir).ok();
 
         loop {
             if !data_clone.is_running.load(Ordering::Relaxed) {
